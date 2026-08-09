@@ -92,6 +92,9 @@ def _meta(lines: list[str]) -> dict:
     ou = re.search(r"Adres:(\d+),\s*Attr:OC[^,]*,\s*Modl:([^,]+)", lines[1])
     if ou:
         m["ou_address"] = ou.group(1)
+        # CAUTION: the MN Converter resolves this from an internal model table
+        # and can mis-identify the unit (observed: a PUMY-P200YKM3 reported as
+        # "PUMY-P36/48NKMU1"). Treat as a hint; trust the nameplate.
         m["ou_model"] = ou.group(2).strip()
     return m
 

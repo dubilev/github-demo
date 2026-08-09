@@ -168,9 +168,15 @@ Thermistor definitions, control parameters, protection setpoints, and operating
 ranges used to ground the detectors. Load-bearing items were cross-checked
 against at least two independent sources:
 
+**Unit identity caveat:** the MN Converter resolves the outdoor-unit model from
+an internal table and can mis-identify it — the reference system here reported
+itself as "PUMY-P36/48NKMU1" but is nameplate-confirmed as a **PUMY-P200YKM3**
+(22.4 kW cooling / 25.0 kW heating, 3-phase, factory charge 7.3 kg R410A, up to
+12 indoor units via branch boxes). Trust the nameplate over the log preamble.
+
 **Thermistor roles** (TH2 HIC pipe, TH3 outdoor liquid, TH4 compressor, TH6
 suction, TH7 ambient, TH8 heat sink) — confirmed by two independent Mitsubishi
-service manuals:
+service manuals, from the exact family of the reference unit:
 - PUMY-P200YKM Technical & Service Manual — thermistor feature chart.
 - PUMY-P200YKM manual error-code pages naming "Hic Pipe Temperature Thermistor
   (TH2)" and the suction-pipe thermistor (TH6), independently confirming the
@@ -191,7 +197,8 @@ service manuals:
   pressure per PUMY-P NKMU documentation.
 - Discharge-temperature compressor protection (~110 °C limiting, ~125 °C stop)
   for Mitsubishi R410A systems.
-- Cooling envelope −5…46 °C, heating −25…21 °C (PUMY-P NKMU operating range).
+- Cooling envelope −5…46 °C DB; heating minimum −20 °C WB (YKM series) /
+  −25 °C (NA hyper-heat NKMU variants).
 
 **Diagnostic principles:**
 - TXV/LEV systems are charged by **subcooling**; the valve holds evaporator

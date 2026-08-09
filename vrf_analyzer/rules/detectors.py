@@ -570,14 +570,16 @@ class InverterOverheat(Detector):
 class AmbientLimits(Detector):
     """Operation outside the unit's rated outdoor-temperature envelope.
 
-    PUMY-P NKMU guaranteed range: cooling -5...46 C, heating -25...21 C.
-    Operating beyond these voids performance guarantees and stresses the system.
+    Defaults follow the PUMY range: cooling -5...46 C DB. Heating minimum is
+    -20 C WB on the international YKM series (the target unit here, a
+    PUMY-P200YKM3); the NA hyper-heat NKMU variants reach -25 C. Adjust
+    per model via params.
     """
 
     spec = CATALOG_BY_ID["R24_ambient_limits"]
     params = {
         "cool_min_c": -5.0, "cool_max_c": 46.0,
-        "heat_min_c": -25.0, "heat_max_c": 21.0,
+        "heat_min_c": -20.0, "heat_max_c": 21.0,
         "min_samples": 10,
     }
 
