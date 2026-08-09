@@ -86,6 +86,10 @@ def _find_header_lines(lines: list[str]) -> tuple[int, int]:
 
 
 def _meta(lines: list[str]) -> dict:
+    # CAUTION: timestamps come from the MN Converter / laptop clock and can be
+    # plain wrong (observed: a capture stamped one year in the past). Verify
+    # capture dates with the operator before drawing any cross-log,
+    # time-based conclusion (leak trends, degradation, before/after claims).
     m = {}
     first = lines[0]
     for key in ("StrtDate", "StrtTime", "EndDate", "EndTime", "Cycle", "Units", "Records"):

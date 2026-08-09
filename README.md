@@ -88,6 +88,20 @@ fault-code rollup.
 
 ### Diagnostic logic notes
 
+- **Timestamps are untrustworthy metadata.** MN Converter captures are stamped
+  from the converter/laptop clock, which can be wrong by years (observed in the
+  reference data: a capture stamped 2025 that was actually taken in 2026, days
+  after its companion log). Confirm capture dates with the operator before any
+  cross-log trend conclusion.
+- **Subcool capability is operating-point dependent.** A higher ETm (target
+  evaporating temperature) raises low-side pressure and holds more refrigerant
+  mass in the low side; on a marginally charged system the liquid line then
+  runs near saturation and the HIC subcool circuit misses its target — at a
+  lower ETm the same charge can look healthy. Compare charge indicators at the
+  same ETm, and treat "fails target at high ETm, passes at low ETm" as the
+  signature of *marginal* charge (or an undersized/degraded HIC circuit), not
+  of charge loss between the logs.
+
 - **Charge is judged by subcooling, not superheat.** On a LEV/TXV system the
   expansion valve holds evaporator superheat roughly constant, so superheat is
   not an independent charge indicator. The undercharge detector triggers on

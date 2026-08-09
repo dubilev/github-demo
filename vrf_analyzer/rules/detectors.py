@@ -123,8 +123,12 @@ class RefrigerantUndercharge(Detector):
                          f"(median {med_hic:.1f} K vs {med_tgt:.0f} K target{lev_note})."),
                 recommendation=(
                     "The unit's subcool control is missing its own target - "
-                    "consistent with low charge. Leak-search, then verify charge "
-                    "by weigh-in against nameplate + line trim."),
+                    "consistent with low charge, BUT subcool capability depends "
+                    "on the operating point (a higher ETm/evap target raises "
+                    "low-side pressure and shifts refrigerant mass to the low "
+                    "side, starving the liquid line on a marginally charged "
+                    "system). Compare logs at the same ETm before concluding, "
+                    "then verify charge by weigh-in against nameplate + trim."),
                 metrics={"duty_fraction": round(duty, 3),
                          "median_hic_subcool_k": round(med_hic, 2),
                          "median_target_k": round(med_tgt, 2)},
