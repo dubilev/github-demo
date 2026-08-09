@@ -5,11 +5,12 @@ Mitsubishi tools, **indexes** them into a fast columnar store, and **assesses**
 the data against the **top 25 issues** common to VRF systems — surfacing findings
 with severity, evidence, and recommended action in a web dashboard.
 
-> Status: **working prototype**. 8 of the 25 detectors are implemented
-> end-to-end; the remaining 17 are catalogued and wired, ready to implement.
+> Status: **working prototype**. 13 of the 25 detectors are implemented
+> end-to-end; the remaining 12 are catalogued and wired, ready to implement.
 > The parser reads real **Mitsubishi MN Converter** service exports
 > (auto-detected), converts R410A/R32 pressures to saturation temperatures, and
-> derives subcooling/superheat for refrigerant-cycle diagnostics.
+> derives system- and per-zone subcooling/superheat plus per-zone expansion-valve
+> position for refrigerant-cycle diagnostics.
 
 ## Pipeline
 
@@ -59,9 +60,11 @@ Run `vrf catalog`, or see `vrf_analyzer/rules/catalog.py`. Categories cover
 refrigerant charge/leaks, pressures, compressor & electrical health, expansion
 valves, airflow/coils, sensors, controls/communication, comfort, and efficiency.
 
-**Live detectors in this prototype:** refrigerant undercharge, high discharge
-temperature, high-/low-pressure trip risk, compressor short-cycling, room-temp
-comfort deviation, thermistor drift/failure, and fault-code rollup.
+**Live detectors in this prototype (13/25):** refrigerant undercharge, high
+discharge temperature, high-/low-pressure trip risk, expansion-valve (LEV)
+fault, dirty/blocked condenser, evaporator icing, high compressor current,
+inverter/heatsink overheat, compressor short-cycling, room-temp comfort
+deviation, thermistor drift/failure, and fault-code rollup.
 
 ## Supported formats
 
@@ -77,9 +80,15 @@ comfort deviation, thermistor drift/failure, and fault-code rollup.
 - A trimmed, serial-redacted real export is committed at
   `data/sample/mn_converter_sample.CSV` and drives the regression tests.
 
+Per-indoor `LEV{k}` (expansion-valve opening), `SC{k}`/`SCm{k}` (subcool, when
+populated) are mapped to each indoor unit, and per-zone suction superheat is
+derived from the indoor gas-pipe thermistor and the system evaporating
+temperature.
+
 On the sample PUMY-P36/48 export, the tool flags a real **refrigerant
-undercharge** signature: subcooling averaging ~1 K against the unit's 10 K
-target with ~23 K suction superheat during compressor operation.
+undercharge** signature (subcooling averaging ~1 K against the unit's 10 K
+target with ~23 K suction superheat) and the resulting **evaporator icing risk**
+(evaporating temperature dipping to −9 °C during low-load operation).
 
 ## Adapting to your CSV format
 

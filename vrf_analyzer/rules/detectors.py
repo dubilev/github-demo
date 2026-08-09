@@ -326,6 +326,173 @@ class LowPressureTripRisk(Detector):
         return out
 
 
+class LEVFault(Detector):
+    """Expansion valve not controlling: pinned at a travel limit while the zone's
+    superheat stays abnormal. Reported per indoor unit as an aggregated finding.
+    """
+
+    spec = CATALOG_BY_ID["R07_lev_fault"]
+    params = {
+        "max_rail": 470, "min_open": 70,
+        "high_superheat_k": 15.0, "low_superheat_k": 1.0,
+        "min_duty": 0.2, "min_active_samples": 30,
+    }
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        if not _has(df, "lev_pulse", "superheat"):
+            return []
+        p = self.params
+        act = _active_mask(df) & df["lev_pulse"].notna() & df["superheat"].notna()
+        run = df[act]
+        if len(run) < p["min_active_samples"]:
+            return []
+        starved = (run["lev_pulse"] >= p["max_rail"]) & (
+            run["superheat"] > p["high_superheat_k"])
+        flooding = (run["lev_pulse"] <= p["min_open"]) & (
+            run["superheat"] < p["low_superheat_k"])
+        for label, mask in (("maxed open with high superheat (zone underfed)", starved),
+                            ("nearly closed with low superheat (zone flooded)", flooding)):
+            duty = float(mask.mean())
+            if duty >= p["min_duty"]:
+                bad = run[mask]
+                return [self._finding(
+                    df, start=bad["timestamp"].min(), end=bad["timestamp"].max(),
+                    severity=Severity.MEDIUM,
+                    message=(f"Expansion valve {label} during {duty*100:.0f}% of "
+                             f"run time (avg superheat {bad['superheat'].mean():.1f} K)."),
+                    recommendation=("Inspect the LEV coil/connector and valve "
+                                    "operation; verify the superheat sensor."),
+                    metrics={"duty_fraction": round(duty, 3),
+                             "avg_superheat_k": round(float(bad["superheat"].mean()), 2)},
+                )]
+        return []
+
+
+class DirtyCondenser(Detector):
+    """Elevated condensing approach (cond_temp - ambient) in cooling -> a fouled
+    or airflow-restricted outdoor coil.
+    """
+
+    spec = CATALOG_BY_ID["R10_dirty_condenser"]
+    params = {"max_approach_k": 15.0, "min_samples": 15}
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        if not _has(df, "cond_temp", "outdoor_temp"):
+            return []
+        p = self.params
+        cooling = _active_mask(df) & (df.get("mode") == "cool")
+        approach = (df["cond_temp"] - df["outdoor_temp"]).where(cooling)
+        mask = (approach > p["max_approach_k"]).fillna(False)
+        out: list[Finding] = []
+        for start, end, n in _contiguous_windows(mask, df["timestamp"], p["min_samples"]):
+            win_ap = approach[(df["timestamp"] >= start) & (df["timestamp"] <= end)]
+            out.append(self._finding(
+                df, start=start, end=end, severity=Severity.MEDIUM,
+                message=(f"Condensing approach elevated (avg {win_ap.mean():.1f} K "
+                         f"above ambient) for {n} samples."),
+                recommendation=("Clean the outdoor coil, check the outdoor fan and "
+                                "for airflow obstructions/recirculation."),
+                metrics={"avg_approach_k": round(float(win_ap.mean()), 2), "samples": n},
+            ))
+        return out
+
+
+class EvaporatorIcing(Detector):
+    """Evaporating temperature below freezing during cooling -> coil frosting /
+    low-load or low-airflow risk. Aggregated to one finding per unit.
+    """
+
+    spec = CATALOG_BY_ID["R12_evap_icing"]
+    params = {"evap_limit_c": -3.0, "min_samples": 10}
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        if not _has(df, "evap_temp"):
+            return []
+        p = self.params
+        cooling = _active_mask(df)
+        if _has(df, "mode"):
+            cooling = cooling & (df["mode"] == "cool")
+        mask = ((df["evap_temp"] < p["evap_limit_c"]) & cooling).fillna(False)
+        episodes = list(_contiguous_windows(mask, df["timestamp"], p["min_samples"]))
+        if not episodes:
+            return []
+        total = sum(n for _, _, n in episodes)
+        coldest = float(df["evap_temp"][mask].min())
+        return [self._finding(
+            df, start=episodes[0][0], end=episodes[-1][1], severity=Severity.MEDIUM,
+            message=(f"Evaporating temp below {p['evap_limit_c']:.0f} C in "
+                     f"{len(episodes)} episodes ({total} samples, coldest "
+                     f"{coldest:.1f} C) - coil frosting/low-load risk."),
+            recommendation=("Check indoor airflow/filters, load matching, and for "
+                            "low charge or a restricted expansion valve."),
+            metrics={"episodes": len(episodes), "total_samples": total,
+                     "coldest_evap_c": round(coldest, 1)},
+        )]
+
+
+class HighCompressorCurrent(Detector):
+    """Compressor current abnormally high for its running frequency, relative to
+    the unit's own current/frequency envelope.
+    """
+
+    spec = CATALOG_BY_ID["R17_high_current"]
+    params = {"ratio_factor": 1.35, "min_freq_hz": 5.0,
+              "min_current_a": 2.0, "min_duty": 0.1, "min_samples": 30}
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        if not _has(df, "comp_current", "comp_freq"):
+            return []
+        p = self.params
+        run = df[(df["comp_freq"] > p["min_freq_hz"])
+                 & (df["comp_current"] > p["min_current_a"])]
+        if len(run) < p["min_samples"]:
+            return []
+        ratio = run["comp_current"] / run["comp_freq"]
+        baseline = float(ratio.median())
+        mask = ratio > p["ratio_factor"] * baseline
+        duty = float(mask.mean())
+        if duty < p["min_duty"]:
+            return []
+        bad = run[mask]
+        return [self._finding(
+            df, start=bad["timestamp"].min(), end=bad["timestamp"].max(),
+            severity=Severity.HIGH,
+            message=(f"Compressor current high for its frequency during "
+                     f"{duty*100:.0f}% of run time (ratio > {p['ratio_factor']:.2f}x "
+                     f"the {baseline:.2f} A/Hz baseline)."),
+            recommendation=("Check compressor mechanical load, voltage imbalance, "
+                            "and for liquid floodback or high head pressure."),
+            metrics={"duty_fraction": round(duty, 3),
+                     "baseline_a_per_hz": round(baseline, 3)},
+        )]
+
+
+class InverterOverheat(Detector):
+    """Inverter/heatsink temperature (THHS) approaching its protection limit."""
+
+    spec = CATALOG_BY_ID["R18_inverter_overheat"]
+    params = {"limit_c": 90.0, "critical_c": 100.0, "min_samples": 3}
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        if not _has(df, "heatsink_temp"):
+            return []
+        p = self.params
+        mask = (df["heatsink_temp"] > p["limit_c"]).fillna(False)
+        out: list[Finding] = []
+        for start, end, n in _contiguous_windows(mask, df["timestamp"], p["min_samples"]):
+            win = df[(df["timestamp"] >= start) & (df["timestamp"] <= end)]
+            peak = float(win["heatsink_temp"].max())
+            sev = Severity.CRITICAL if peak > p["critical_c"] else Severity.HIGH
+            out.append(self._finding(
+                df, start=start, end=end, severity=sev,
+                message=f"Heatsink temp exceeded {p['limit_c']:.0f} C (peak {peak:.1f} C).",
+                recommendation=("Check outdoor airflow/heatsink cooling, ambient "
+                                "limits, and inverter fan."),
+                metrics={"peak_c": round(peak, 1), "samples": n},
+            ))
+        return out
+
+
 class FaultCodeRollup(Detector):
     spec = CATALOG_BY_ID["R25_fault_rollup"]
     params = {"ok_values": {"", "0", "00", "nan", "none", "-"}}
@@ -355,6 +522,11 @@ IMPLEMENTED_DETECTORS = [
     HighDischargeTemp,
     HighPressureTripRisk,
     LowPressureTripRisk,
+    LEVFault,
+    DirtyCondenser,
+    EvaporatorIcing,
+    HighCompressorCurrent,
+    InverterOverheat,
     CompressorShortCycling,
     ComfortDeviation,
     ThermistorFault,

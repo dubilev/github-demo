@@ -164,8 +164,13 @@ def read_mn_converter(path: str, refrigerant: str = "R410A") -> pd.DataFrame:
     frames.append(ou)
 
     # --- indoor units ----------------------------------------------------
+    # The OU section carries per-indoor arrays LEV{k}/SC{k}/SCm{k}, indexed by
+    # the indoor unit's position (1-based) in address order. LEV{k} is the
+    # zone's expansion-valve opening; SC{k}/SCm{k} are subcool actual/target
+    # (often unreported -- all zero -- in OM exports, so mapped only if nonzero).
     ic_owners = sorted({o for o in owners if o.startswith("IC")})
-    for owner in ic_owners:
+    evap = ou["evap_temp"].to_numpy()
+    for k, owner in enumerate(ic_owners, start=1):
         addr = re.search(r"IC\((\d+)\)", owner)
         unit_id = f"IC-{addr.group(1)}" if addr else owner
         iu = _blank(ts, system_id, unit_id, UnitRole.INDOOR)
@@ -184,11 +189,33 @@ def read_mn_converter(path: str, refrigerant: str = "R410A") -> pd.DataFrame:
                 iu["mode"] = state_col.map(_mode_from)
             else:
                 iu[canonical] = pd.to_numeric(col, errors="coerce")
+
+        # per-zone expansion valve (from the OU LEV{k} array)
+        lev = _col("OC", f"LEV{k}")
+        if lev is not None:
+            iu["lev_pulse"] = pd.to_numeric(lev, errors="coerce")
+        # per-zone subcool arrays, only if actually populated
+        sc_k = _col("OC", f"SC{k}")
+        scm_k = _col("OC", f"SCm{k}")
+        if sc_k is not None and pd.to_numeric(sc_k, errors="coerce").abs().sum() > 0:
+            iu["subcool"] = pd.to_numeric(sc_k, errors="coerce")
+        if scm_k is not None and pd.to_numeric(scm_k, errors="coerce").abs().sum() > 0:
+            iu["subcool_target"] = pd.to_numeric(scm_k, errors="coerce")
+
         # mask indoor pipe temps to active periods (state contains 'ON')
-        if state_col is not None:
-            active = state_col.str.upper().str.contains("ON", na=False)
-            for sig in ("liquid_pipe_temp", "gas_pipe_temp"):
-                iu[sig] = iu[sig].where(active)
+        active = (
+            state_col.str.upper().str.contains("ON", na=False)
+            if state_col is not None
+            else pd.Series(True, index=iu.index)
+        )
+        for sig in ("liquid_pipe_temp", "gas_pipe_temp"):
+            iu[sig] = iu[sig].where(active)
+        # per-zone suction superheat = indoor gas-pipe temp - system evap temp
+        iu["superheat"] = np.where(
+            active.to_numpy() & ~np.isnan(evap),
+            iu["gas_pipe_temp"].to_numpy() - evap,
+            np.nan,
+        )
         frames.append(iu)
 
     df = pd.concat(frames, ignore_index=True)
