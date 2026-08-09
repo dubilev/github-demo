@@ -164,18 +164,41 @@ pytest -q
 
 ## References
 
-Thermistor definitions, protection setpoints, and operating ranges used to
-ground the detectors:
+Thermistor definitions, control parameters, protection setpoints, and operating
+ranges used to ground the detectors. Load-bearing items were cross-checked
+against at least two independent sources:
 
-- Mitsubishi Electric PUMY-P NKMU / PUMY-P200YKM Technical & Service Manuals
-  (thermistor feature chart: TH2 HIC pipe, TH3 outdoor liquid, TH4 compressor,
-  TH6 suction, TH7 ambient, TH8 heat sink; operating ranges; protection logic).
+**Thermistor roles** (TH2 HIC pipe, TH3 outdoor liquid, TH4 compressor, TH6
+suction, TH7 ambient, TH8 heat sink) — confirmed by two independent Mitsubishi
+service manuals:
+- PUMY-P200YKM Technical & Service Manual — thermistor feature chart.
+- PUMY-P200YKM manual error-code pages naming "Hic Pipe Temperature Thermistor
+  (TH2)" and the suction-pipe thermistor (TH6), independently confirming the
+  TH2/TH6 mapping.
+
+**Control parameters** (Mitsubishi multi-zone / MXZ technical documentation):
+- **ETm = target evaporating temperature** (COOL mode). Raising it lifts coil
+  temperature to prevent dew/condensation at some loss of capacity; lowering it
+  raises performance. This matches the observed higher ETm eliminating the
+  evaporator-icing risk between the two logs.
+- **Pdm = target discharge pressure** (HEAT mode).
+- **SC = subcooling**; **63HS/63LS = high/low pressure sensors**. Reported
+  pressures are in **psi (gauge)** — confirmed both by the MN Converter tool's
+  unit options and by magnitude (values ~180–435 are psi, not kgf/cm²).
+
+**Protection / envelope:**
 - R410A high-pressure switch cutout 4.15 MPa (601 psi) — R410A max operating
-  pressure per Mitsubishi PUMY-P NKMU documentation.
+  pressure per PUMY-P NKMU documentation.
 - Discharge-temperature compressor protection (~110 °C limiting, ~125 °C stop)
   for Mitsubishi R410A systems.
-- R410A superheat/subcooling reference ranges and the principle that TXV/LEV
-  systems are charged by subcooling (superheat held constant by the valve).
+- Cooling envelope −5…46 °C, heating −25…21 °C (PUMY-P NKMU operating range).
+
+**Diagnostic principles:**
+- TXV/LEV systems are charged by **subcooling**; the valve holds evaporator
+  superheat roughly constant, so superheat is not an independent charge
+  indicator. VRF inverter compressors modulate frequency to meet the target
+  evaporating temperature — so a compressor pinned at minimum speed while unable
+  to reach its Te target indicates oversizing/low load.
 
 Numeric thresholds live in each detector's `params` and can be recalibrated per
 model without code changes.

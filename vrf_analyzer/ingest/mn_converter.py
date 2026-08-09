@@ -149,7 +149,9 @@ def read_mn_converter(path: str, refrigerant: str = "R410A") -> pd.DataFrame:
         else:
             ou[canonical] = pd.to_numeric(col, errors="coerce")
 
-    # unit conversions
+    # unit conversions. 63HS/63LS are reported in psi gauge on these NKMU
+    # (North America) exports -- confirmed by magnitude (R410A high side ~300-450
+    # psi; kgf/cm2 would read ~20-30) and by the MN Converter unit options.
     if ou["high_pressure"].notna().any():
         ou["high_pressure"] = psi_gauge_to_kpa_gauge(ou["high_pressure"])
     if ou["low_pressure"].notna().any():
