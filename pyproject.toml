@@ -1,0 +1,33 @@
+[project]
+name = "vrf-analyzer"
+version = "0.1.0"
+description = "Analysis software for Mitsubishi VRF CSV logs: ingest, index, and assess against the top 25 VRF issues."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "pyarrow>=14.0",
+    "duckdb>=0.10",
+    "pydantic>=2.5",
+    "typer>=0.12",
+    "plotly>=5.18",
+    "streamlit>=1.31",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+vrf = "vrf_analyzer.cli:app"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["vrf_analyzer*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

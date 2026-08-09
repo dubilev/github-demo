@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Project
+.vrf_index/
+*.parquet
+.pytest_cache/
+.streamlit/
+
+# Keep sample data
+!data/sample/
