@@ -68,6 +68,10 @@ class Detector:
 
     spec: RuleSpec
 
+    #: "unit" detectors see one unit's rows; "system" detectors see a whole
+    #: refrigerant system (all its units) for cross-unit checks.
+    scope: str = "unit"
+
     #: default tunables; overridable per-instance via constructor
     params: dict = {}
 

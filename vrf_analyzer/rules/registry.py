@@ -50,11 +50,28 @@ def assess_unit(df: pd.DataFrame, detectors: list[Detector] | None = None) -> li
 
 
 def assess(df: pd.DataFrame, detectors: list[Detector] | None = None) -> list[Finding]:
-    """Run detectors over every (system, unit) group in a normalized frame."""
+    """Run detectors over a normalized frame.
+
+    Unit-scoped detectors run per (system, unit); system-scoped detectors run
+    once per system with all its units' rows.
+    """
     detectors = detectors or build_detectors()
+    unit_dets = [d for d in detectors if getattr(d, "scope", "unit") != "system"]
+    sys_dets = [d for d in detectors if getattr(d, "scope", "unit") == "system"]
     out: list[Finding] = []
     for (_sys, _unit), grp in df.groupby(["system_id", "unit_id"], dropna=False):
-        out.extend(assess_unit(grp.sort_values("timestamp"), detectors))
+        out.extend(assess_unit(grp.sort_values("timestamp"), unit_dets))
+    for _sys, grp in df.groupby("system_id", dropna=False):
+        for det in sys_dets:
+            try:
+                out.extend(det.run(grp.sort_values("timestamp")))
+            except Exception as exc:
+                out.append(Finding(
+                    rule_id=det.spec.rule_id,
+                    title=f"[detector error] {det.spec.title}",
+                    severity=det.spec.default_severity,
+                    system_id=str(grp["system_id"].iloc[0]), unit_id="*",
+                    message=f"detector raised: {exc!r}"))
     out.sort(key=lambda f: int(f.severity), reverse=True)
     return out
 

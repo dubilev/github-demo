@@ -5,8 +5,10 @@ Mitsubishi tools, **indexes** them into a fast columnar store, and **assesses**
 the data against the **top 25 issues** common to VRF systems — surfacing findings
 with severity, evidence, and recommended action in a web dashboard.
 
-> Status: **working prototype**. 14 of the 25 detectors are implemented
-> end-to-end; the remaining 11 are catalogued and wired, ready to implement.
+> Status: **working prototype**. **All 25 detectors are implemented.** On a
+> given dataset a detector either produces findings, stays silent, or reports
+> `insufficient_data` when its required signals aren't present (e.g. comfort
+> needs setpoints, which an outdoor-unit OM export lacks).
 > The parser reads real **Mitsubishi MN Converter** service exports
 > (auto-detected), converts R410A/R32 pressures to saturation temperatures, and
 > derives system- and per-zone subcooling/superheat plus per-zone expansion-valve
@@ -76,11 +78,12 @@ Run `vrf catalog`, or see `vrf_analyzer/rules/catalog.py`. Categories cover
 refrigerant charge/leaks, pressures, compressor & electrical health, expansion
 valves, airflow/coils, sensors, controls/communication, comfort, and efficiency.
 
-**Live detectors in this prototype (14/25):** refrigerant undercharge, high
-discharge temperature, high-/low-pressure trip risk, expansion-valve (LEV)
-fault, dirty/blocked condenser, evaporator icing, high compressor current,
-inverter/heatsink overheat, compressor short-cycling, room-temp comfort
-deviation, thermistor drift/failure, operation outside ambient limits, and
+**All 25 detectors are implemented.** Run `vrf catalog` for the list and each
+one's default severity. They span refrigerant charge (under/overcharge, leak
+trend), pressures and discharge temperature, expansion-valve and reversing-valve
+faults, condenser/evaporator/airflow issues, compressor behaviour (short-cycling,
+oil return, high current, part-load/oversizing), inverter overheat, sensors,
+communications, comfort, mode conflict, efficiency trend, ambient limits, and
 fault-code rollup.
 
 ### Diagnostic logic notes
@@ -151,10 +154,12 @@ pytest -q
 
 ## Roadmap
 
-- Implement the remaining 19 detectors against real data.
-- Saturated-temperature conversion (pressure → `cond_temp`/`evap_temp`) using
-  the actual refrigerant (e.g. R410A/R32) for charge & coil diagnostics.
-- Multi-day trend detectors (leak, COP degradation).
+- Calibrate thresholds against more labelled real data (turn the heuristic
+  probabilities into calibrated ones).
+- Second profile for controller-side exports (AE-200/EW-50) to add setpoints,
+  unlocking the comfort and mode-conflict detectors on real data.
+- Longer-horizon ingest so trend detectors (leak, COP degradation) have weeks
+  of data.
 - Per-detector threshold calibration UI and exportable PDF reports.
 
 ## References

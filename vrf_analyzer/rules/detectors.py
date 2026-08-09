@@ -48,6 +48,24 @@ def _active_mask(df: pd.DataFrame) -> pd.Series:
     return active if have_signal else pd.Series(True, index=df.index)
 
 
+def _span_days(ts: pd.Series) -> float:
+    ts = pd.to_datetime(ts)
+    if len(ts) < 2:
+        return 0.0
+    return (ts.iloc[-1] - ts.iloc[0]).total_seconds() / 86400.0
+
+
+def _slope_per_day(ts: pd.Series, vals: pd.Series):
+    """Least-squares slope of vals vs time, in units per day. None if degenerate."""
+    ts = pd.to_datetime(ts)
+    t = (ts - ts.iloc[0]).dt.total_seconds().to_numpy() / 86400.0
+    v = vals.to_numpy(dtype=float)
+    ok = ~np.isnan(v)
+    if ok.sum() < 3 or np.ptp(t[ok]) < 1e-6:
+        return None
+    return float(np.polyfit(t[ok], v[ok], 1)[0])
+
+
 class RefrigerantUndercharge(Detector):
     """Low subcooling -> possible undercharge, using VRF (LEV) charge logic.
 
@@ -120,6 +138,45 @@ class RefrigerantUndercharge(Detector):
                 "superheat_high_duty": round(sh_duty, 3),
                 "running_samples": int(len(run)),
             },
+        )]
+
+
+class RefrigerantOvercharge(Detector):
+    """High subcooling (with elevated head pressure) -> possible overcharge.
+
+    The mirror of R01 for a LEV system: excess charge backs liquid into the
+    condenser, raising subcooling and head pressure.
+    """
+
+    spec = CATALOG_BY_ID["R02_overcharge"]
+    params = {"high_subcool_k": 12.0, "high_hp_kpa": 3400.0,
+              "min_duty": 0.30, "min_running_samples": 30}
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        if not _has(df, "subcool"):
+            return []
+        p = self.params
+        run = df[_active_mask(df) & df["subcool"].notna()]
+        if len(run) < p["min_running_samples"]:
+            return []
+        high = run["subcool"] > p["high_subcool_k"]
+        duty = float(high.mean())
+        if duty < p["min_duty"]:
+            return []
+        avg_sc = float(run.loc[high, "subcool"].mean())
+        hp_duty = 0.0
+        if _has(run, "high_pressure"):
+            hp_duty = float((run.loc[high, "high_pressure"] > p["high_hp_kpa"]).mean())
+        sev = Severity.HIGH if hp_duty >= 0.3 else Severity.MEDIUM
+        return [self._finding(
+            df, start=run.loc[high, "timestamp"].min(), end=run.loc[high, "timestamp"].max(),
+            severity=sev,
+            message=(f"High subcooling (avg {avg_sc:.1f} K) during {duty*100:.0f}% of "
+                     f"run time - possible overcharge."),
+            recommendation=("Verify charge against commissioning; check for excess "
+                            "refrigerant and condenser airflow/fouling raising head pressure."),
+            metrics={"duty_fraction": round(duty, 3), "avg_subcool_k": round(avg_sc, 2),
+                     "high_hp_duty": round(hp_duty, 3)},
         )]
 
 
@@ -576,8 +633,338 @@ class FaultCodeRollup(Detector):
         )]
 
 
+class RefrigerantLeakTrend(Detector):
+    """Slow multi-day decline in subcooling -> a developing refrigerant leak.
+
+    Distinct from R01 (a snapshot of low subcool): this looks for a downward
+    *trend* over days. Needs a long enough window to be meaningful.
+    """
+
+    spec = CATALOG_BY_ID["R03_leak_trend"]
+    params = {"min_days": 2.0, "slope_k_per_day": -0.4, "min_drop_k": 1.0}
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        if not _has(df, "subcool"):
+            return []
+        run = df[_active_mask(df) & df["subcool"].notna()]
+        if _span_days(run["timestamp"]) < self.params["min_days"] or len(run) < 100:
+            return []
+        hourly = (run.set_index("timestamp")["subcool"]
+                  .resample("1h").median().dropna())
+        if len(hourly) < 6:
+            return []
+        slope = _slope_per_day(hourly.index.to_series(), hourly)
+        drop = float(hourly.iloc[:3].mean() - hourly.iloc[-3:].mean())
+        if slope is None or slope > self.params["slope_k_per_day"] or drop < self.params["min_drop_k"]:
+            return []
+        return [self._finding(
+            df, start=run["timestamp"].min(), end=run["timestamp"].max(),
+            severity=Severity.HIGH,
+            message=(f"Subcooling trending down {abs(slope):.2f} K/day "
+                     f"(dropped ~{drop:.1f} K over the log) - possible leak."),
+            recommendation=("Trend suggests a developing leak; schedule a leak "
+                            "search and monitor charge over time."),
+            metrics={"slope_k_per_day": round(slope, 3), "drop_k": round(drop, 2)},
+        )]
+
+
+class ExcessiveDefrost(Detector):
+    """Too-frequent defrost cycles during heating."""
+
+    spec = CATALOG_BY_ID["R09_excess_defrost"]
+    params = {"max_defrosts_per_hour": 2.5, "min_heating_hours": 1.0}
+
+    def _defrost_flag(self, df: pd.DataFrame) -> pd.Series:
+        flag = pd.Series(False, index=df.index)
+        if "defrost" in df:
+            flag = flag | df["defrost"].fillna(False).astype(bool)
+        if "mode" in df:
+            flag = flag | (df["mode"] == "defrost")
+        return flag
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        if "mode" not in df:
+            return []
+        heating = (df["mode"].isin(["heat", "defrost"]))
+        heat_hours = float(heating.sum()) * self._interval_h(df)
+        if heat_hours < self.params["min_heating_hours"]:
+            return []
+        flag = self._defrost_flag(df)
+        starts = int((flag.astype(int).diff() == 1).sum())
+        rate = starts / heat_hours if heat_hours else 0
+        if rate <= self.params["max_defrosts_per_hour"]:
+            return []
+        return [self._finding(
+            df, start=df["timestamp"].min(), end=df["timestamp"].max(),
+            severity=Severity.LOW,
+            message=f"{starts} defrost cycles over {heat_hours:.1f} heating-hours ({rate:.1f}/h).",
+            recommendation=("Check outdoor coil airflow, defrost sensor, and for "
+                            "low charge causing frequent frosting."),
+            metrics={"defrosts_per_hour": round(rate, 2)},
+        )]
+
+    @staticmethod
+    def _interval_h(df: pd.DataFrame) -> float:
+        ts = pd.to_datetime(df["timestamp"])
+        if len(ts) < 2:
+            return 1 / 60
+        return float(ts.diff().median().total_seconds()) / 3600.0
+
+
+class LowIndoorAirflow(Detector):
+    """Dirty filter / low indoor airflow: small air-side delta-T with reduced fan."""
+
+    spec = CATALOG_BY_ID["R11_low_indoor_airflow"]
+    params = {"min_air_dt_k": 3.0, "min_samples": 30}
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        # requires indoor return + supply/inlet air and fan feedback
+        if not _has(df, "room_temp", "inlet_temp", "fan_speed"):
+            return []
+        run = df[_active_mask(df)]
+        if len(run) < self.params["min_samples"]:
+            return []
+        air_dt = (run["room_temp"] - run["inlet_temp"]).abs()
+        low = (air_dt < self.params["min_air_dt_k"]) & (run["fan_speed"] > 0)
+        duty = float(low.mean())
+        if duty < 0.3:
+            return []
+        return [self._finding(
+            df, severity=Severity.LOW,
+            message=(f"Low air-side delta-T (<{self.params['min_air_dt_k']:.0f} K) "
+                     f"during {duty*100:.0f}% of run time."),
+            recommendation="Check/clean the filter and coil; verify indoor airflow.",
+            metrics={"duty_fraction": round(duty, 3)},
+        )]
+
+
+class CommunicationError(Detector):
+    """Communication faults: comm error codes or data dropouts."""
+
+    spec = CATALOG_BY_ID["R14_comm_error"]
+    # Mitsubishi M-NET communication error codes (66xx family)
+    params = {"comm_codes": {"6600", "6602", "6603", "6606", "6607", "6608"},
+              "dropout_factor": 3.0}
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        out: list[Finding] = []
+        # comm error codes
+        if "error_code" in df:
+            codes = df["error_code"].astype("string").str.strip()
+            hit = codes.isin(self.params["comm_codes"])
+            if hit.any():
+                vc = codes[hit].value_counts()
+                out.append(self._finding(
+                    df, start=df["timestamp"][hit].min(), end=df["timestamp"][hit].max(),
+                    severity=Severity.MEDIUM,
+                    message=f"{int(hit.sum())} communication-error samples "
+                            f"({', '.join(f'{c} x{n}' for c, n in vc.head(3).items())}).",
+                    recommendation="Check M-NET wiring, terminations, and addresses.",
+                    metrics={"samples": int(hit.sum())}))
+        # data dropouts (timestamp gaps)
+        ts = pd.to_datetime(df["timestamp"]).sort_values()
+        if len(ts) > 10:
+            dt = ts.diff().dt.total_seconds().dropna()
+            med = dt.median()
+            gaps = dt[dt > self.params["dropout_factor"] * med]
+            if len(gaps) and med > 0:
+                out.append(self._finding(
+                    df, severity=Severity.LOW,
+                    message=(f"{len(gaps)} data dropouts (gaps > "
+                             f"{self.params['dropout_factor']:.0f}x the {med:.0f}s cycle)."),
+                    recommendation="Intermittent logging/comm loss; check the gateway link.",
+                    metrics={"dropouts": int(len(gaps))}))
+        return out
+
+
+class ReversingValveFault(Detector):
+    """4-way reversing valve fault: indoor coil temperature direction disagrees
+    with the commanded mode (coil warmer than room during cooling, or vice versa).
+    """
+
+    spec = CATALOG_BY_ID["R15_reversing_valve"]
+    params = {"margin_k": 3.0, "min_duty": 0.3, "min_samples": 30}
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        if not _has(df, "gas_pipe_temp", "room_temp", "mode"):
+            return []
+        run = df[_active_mask(df) & df["gas_pipe_temp"].notna()]
+        if len(run) < self.params["min_samples"]:
+            return []
+        m = self.params["margin_k"]
+        cool = run["mode"] == "cool"
+        heat = run["mode"] == "heat"
+        # cooling: coil (gas pipe) should be COLDER than room; fault if hotter
+        wrong = ((cool & (run["gas_pipe_temp"] > run["room_temp"] + m)) |
+                 (heat & (run["gas_pipe_temp"] < run["room_temp"] - m)))
+        duty = float(wrong.mean())
+        if duty < self.params["min_duty"]:
+            return []
+        return [self._finding(
+            df, severity=Severity.HIGH,
+            message=(f"Indoor coil temperature direction opposes the commanded "
+                     f"mode during {duty*100:.0f}% of run time."),
+            recommendation=("Suspect a stuck/failed 4-way reversing valve or a "
+                            "swapped pipe sensor; verify valve energisation."),
+            metrics={"duty_fraction": round(duty, 3)},
+        )]
+
+
+class OilReturnProblem(Detector):
+    """Prolonged low-speed running without a high-speed oil-return cycle."""
+
+    spec = CATALOG_BY_ID["R16_oil_return"]
+    params = {"low_freq_hz": 25.0, "oil_return_freq_hz": 40.0,
+              "min_minutes": 180.0}
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        if not _has(df, "comp_freq"):
+            return []
+        interval_min = ExcessiveDefrost._interval_h(df) * 60.0
+        min_len = int(self.params["min_minutes"] / max(interval_min, 1e-6))
+        freq = df["comp_freq"].fillna(0)
+        low = (freq > 0) & (freq < self.params["low_freq_hz"])
+        worst = None
+        for start, end, n in _contiguous_windows(low, df["timestamp"], min_len):
+            win = df[(df["timestamp"] >= start) & (df["timestamp"] <= end)]
+            if win["comp_freq"].max() < self.params["oil_return_freq_hz"]:
+                hours = n * interval_min / 60.0
+                if worst is None or hours > worst[2]:
+                    worst = (start, end, hours, n)
+        if worst is None:
+            return []
+        return [self._finding(
+            df, start=worst[0], end=worst[1], severity=Severity.MEDIUM,
+            message=(f"Compressor ran below {self.params['low_freq_hz']:.0f} Hz for "
+                     f"{worst[2]:.1f} h without an oil-return cycle."),
+            recommendation=("Prolonged low-speed operation risks oil accumulation; "
+                            "check sizing/load and oil-return control."),
+            metrics={"longest_low_speed_hours": round(worst[2], 1)},
+        )]
+
+
+class PartLoadOversizing(Detector):
+    """Compressor pinned at minimum speed most of the time -> oversized for load."""
+
+    spec = CATALOG_BY_ID["R20_part_load"]
+    params = {"min_freq_margin_hz": 3.0, "min_frac_at_min": 0.6, "min_samples": 60}
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        if not _has(df, "comp_freq"):
+            return []
+        run = df[df["comp_freq"].fillna(0) > 0]
+        if len(run) < self.params["min_samples"]:
+            return []
+        fmin = float(run["comp_freq"].min())
+        frac = float((run["comp_freq"] <= fmin + self.params["min_freq_margin_hz"]).mean())
+        if frac < self.params["min_frac_at_min"]:
+            return []
+        return [self._finding(
+            df, start=run["timestamp"].min(), end=run["timestamp"].max(),
+            severity=Severity.LOW,
+            message=(f"Compressor at minimum speed (~{fmin:.0f} Hz) for "
+                     f"{frac*100:.0f}% of run time - system likely oversized for the load."),
+            recommendation=("Persistent minimum-speed operation indicates oversizing/"
+                            "low load; review capacity selection and part-load behaviour."),
+            metrics={"min_freq_hz": round(fmin, 1), "frac_at_min": round(frac, 3)},
+        )]
+
+
+class FanDegradation(Detector):
+    """Outdoor fan not responding to load (stopped/stuck while compressor runs)."""
+
+    spec = CATALOG_BY_ID["R22_fan_degradation"]
+    params = {"min_duty": 0.2, "min_samples": 30}
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        if not _has(df, "fan_speed", "comp_freq"):
+            return []
+        run = df[df["comp_freq"].fillna(0) > 10]  # meaningful load
+        if len(run) < self.params["min_samples"]:
+            return []
+        stalled = (run["fan_speed"].fillna(0) <= 0)
+        duty = float(stalled.mean())
+        if duty < self.params["min_duty"]:
+            return []
+        return [self._finding(
+            df, severity=Severity.MEDIUM,
+            message=(f"Fan reads zero while the compressor is loaded during "
+                     f"{duty*100:.0f}% of run time."),
+            recommendation="Check the fan motor, driver, and feedback sensor.",
+            metrics={"duty_fraction": round(duty, 3)},
+        )]
+
+
+class LowEfficiency(Detector):
+    """Declining efficiency proxy (output-per-power) over the log."""
+
+    spec = CATALOG_BY_ID["R23_low_efficiency"]
+    params = {"min_days": 2.0, "slope_frac_per_day": -0.05}
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        if not _has(df, "power", "comp_freq"):
+            return []
+        run = df[(df["comp_freq"].fillna(0) > 10) & (df["power"].fillna(0) > 0.1)].copy()
+        if _span_days(run["timestamp"]) < self.params["min_days"] or len(run) < 100:
+            return []
+        # crude output-per-power proxy: compressor Hz per kW
+        run["eff"] = run["comp_freq"] / run["power"]
+        hourly = run.set_index("timestamp")["eff"].resample("1h").median().dropna()
+        if len(hourly) < 6:
+            return []
+        slope = _slope_per_day(hourly.index.to_series(), hourly)
+        base = float(hourly.iloc[:3].mean())
+        if slope is None or base <= 0:
+            return []
+        frac = slope / base
+        if frac > self.params["slope_frac_per_day"]:
+            return []
+        return [self._finding(
+            df, start=run["timestamp"].min(), end=run["timestamp"].max(),
+            severity=Severity.LOW,
+            message=(f"Efficiency proxy declining {abs(frac)*100:.1f}%/day over the log."),
+            recommendation=("Trend suggests degrading performance; check fouling, "
+                            "charge, and sensor drift over time."),
+            metrics={"slope_frac_per_day": round(frac, 4)},
+        )]
+
+
+class ModeConflict(Detector):
+    """Indoor units on one system requesting opposing modes at the same time.
+
+    System-scoped: sees all units in a refrigerant system at once.
+    """
+
+    scope = "system"
+    spec = CATALOG_BY_ID["R19_mode_conflict"]
+    params = {"min_samples": 5}
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        iu = df[(df["unit_role"] == "IU") & df["mode"].notna()]
+        if iu.empty:
+            return []
+        piv = iu.pivot_table(index="timestamp", columns="unit_id", values="mode",
+                             aggfunc="first")
+        cool = (piv == "cool").any(axis=1)
+        heat = (piv == "heat").any(axis=1)
+        conflict = cool & heat
+        if int(conflict.sum()) < self.params["min_samples"]:
+            return []
+        times = conflict[conflict].index
+        return [self._finding(
+            df, start=times.min(), end=times.max(), unit_id="*",
+            severity=Severity.LOW,
+            message=(f"Indoor units requested cooling and heating simultaneously "
+                     f"at {int(conflict.sum())} timestamps."),
+            recommendation=("On a non-simultaneous system this conflicts; review "
+                            "zoning/controls or confirm a heat-recovery system."),
+            metrics={"conflict_samples": int(conflict.sum())},
+        )]
+
+
 IMPLEMENTED_DETECTORS = [
     RefrigerantUndercharge,
+    RefrigerantOvercharge,
     HighDischargeTemp,
     HighPressureTripRisk,
     LowPressureTripRisk,
@@ -591,4 +978,14 @@ IMPLEMENTED_DETECTORS = [
     ThermistorFault,
     AmbientLimits,
     FaultCodeRollup,
+    RefrigerantLeakTrend,
+    ExcessiveDefrost,
+    LowIndoorAirflow,
+    CommunicationError,
+    ReversingValveFault,
+    OilReturnProblem,
+    PartLoadOversizing,
+    FanDegradation,
+    LowEfficiency,
+    ModeConflict,
 ]

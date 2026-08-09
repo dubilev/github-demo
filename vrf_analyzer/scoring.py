@@ -23,8 +23,15 @@ import pandas as pd
 
 from .rules.base import Severity
 from .rules.catalog import CATALOG, CATALOG_BY_ID
-from .rules.detectors import _active_mask
+from .rules.detectors import _active_mask, _has, _span_days, _slope_per_day
 from .rules.registry import REGISTRY
+
+
+def _interval_min(df: pd.DataFrame) -> float:
+    ts = pd.to_datetime(df["timestamp"])
+    if len(ts) < 2:
+        return 1.0
+    return float(ts.diff().median().total_seconds()) / 60.0
 
 _MIN_ACTIVE = 20          # need at least this many active samples to assess
 _P_FLOOR, _P_CEIL = 1.0, 97.0   # never claim 0% or 100% certainty
@@ -286,22 +293,182 @@ def _s_fault_rollup(df):
     return (_prob(ev), f"{int(bad.sum())} abnormal-code samples", {"abnormal_samples": int(bad.sum())})
 
 
+def _s_leak_trend(df):
+    if not _has(df, "subcool"):
+        return None
+    run = df[_active_mask(df) & df["subcool"].notna()]
+    if _span_days(run["timestamp"]) < 2.0 or len(run) < 100:
+        return None
+    hourly = run.set_index("timestamp")["subcool"].resample("1h").median().dropna()
+    if len(hourly) < 6:
+        return None
+    slope = _slope_per_day(hourly.index.to_series(), hourly)
+    if slope is None:
+        return None
+    ev = float(np.clip((-slope - 0.2) / (1.0 - 0.2), 0, 1))
+    return (_prob(ev), f"subcool trend {slope:.2f} K/day", {"slope_k_per_day": round(slope, 3)})
+
+
+def _s_excess_defrost(df):
+    if "mode" not in df:
+        return None
+    heating = df["mode"].isin(["heat", "defrost"])
+    hh = float(heating.sum()) * _interval_min(df) / 60.0
+    if hh < 1.0:
+        return None  # no heating operation to assess
+    flag = pd.Series(False, index=df.index)
+    if "defrost" in df:
+        flag = flag | df["defrost"].fillna(False).astype(bool)
+    flag = flag | (df["mode"] == "defrost")
+    rate = int((flag.astype(int).diff() == 1).sum()) / hh
+    ev = float(np.clip((rate - 1.5) / (4.0 - 1.5), 0, 1))
+    return (_prob(ev), f"{rate:.1f} defrosts/heating-hour", {"defrosts_per_hour": round(rate, 2)})
+
+
+def _s_low_airflow(df):
+    if not _has(df, "room_temp", "inlet_temp", "fan_speed"):
+        return None
+    run = df[_active_mask(df)]
+    if len(run) < _MIN_ACTIVE:
+        return None
+    dt = (run["room_temp"] - run["inlet_temp"]).abs()
+    ev = _aggregate(_ramp_low(dt, warn=6.0, fail=2.0))
+    return (_prob(ev), f"median air delta-T {dt.median():.1f} K", {})
+
+
+def _s_comm(df):
+    ev = 0.0
+    if "error_code" in df and df["error_code"].notna().any():
+        codes = df["error_code"].astype("string").str.strip()
+        comm = {"6600", "6602", "6603", "6606", "6607", "6608"}
+        ev = max(ev, min(1.0, float(codes.isin(comm).mean()) * 8))
+    ts = pd.to_datetime(df["timestamp"]).sort_values()
+    if len(ts) > 10:
+        dt = ts.diff().dt.total_seconds().dropna()
+        med = dt.median()
+        if med > 0:
+            ev = max(ev, min(1.0, float((dt > 3 * med).mean()) * 10))
+    return (_prob(ev), "comm error codes / data dropouts", {})
+
+
+def _s_reversing(df):
+    if not _has(df, "gas_pipe_temp", "room_temp", "mode"):
+        return None
+    run = df[_active_mask(df) & df["gas_pipe_temp"].notna()]
+    if len(run) < _MIN_ACTIVE:
+        return None
+    m = 3.0
+    cool, heat = run["mode"] == "cool", run["mode"] == "heat"
+    wrong = ((cool & (run["gas_pipe_temp"] > run["room_temp"] + m)) |
+             (heat & (run["gas_pipe_temp"] < run["room_temp"] - m)))
+    ev = float(wrong.mean())
+    return (_prob(ev), f"wrong-direction coil {ev*100:.0f}% of run time", {})
+
+
+def _s_oil_return(df):
+    if not _has(df, "comp_freq") or len(df) < _MIN_ACTIVE:
+        return None
+    im = _interval_min(df)
+    freq = df["comp_freq"].fillna(0).to_numpy()
+    low = (freq > 0) & (freq < 25)
+    longest, i, n = 0, 0, len(low)
+    while i < n:
+        if low[i]:
+            j, mx = i, 0.0
+            while j < n and low[j]:
+                mx = max(mx, freq[j]); j += 1
+            if mx < 40:
+                longest = max(longest, j - i)
+            i = j
+        else:
+            i += 1
+    hours = longest * im / 60.0
+    ev = float(np.clip((hours - 2.0) / (6.0 - 2.0), 0, 1))
+    return (_prob(ev), f"longest low-speed run {hours:.1f} h", {"low_speed_hours": round(hours, 1)})
+
+
+def _s_part_load(df):
+    if not _has(df, "comp_freq"):
+        return None
+    run = df[df["comp_freq"].fillna(0) > 0]
+    if len(run) < _MIN_ACTIVE:
+        return None
+    fmin = float(run["comp_freq"].min())
+    frac = float((run["comp_freq"] <= fmin + 3).mean())
+    ev = float(np.clip((frac - 0.4) / (0.8 - 0.4), 0, 1))
+    return (_prob(ev), f"{frac*100:.0f}% at minimum speed", {"frac_at_min": round(frac, 3)})
+
+
+def _s_fan(df):
+    if not _has(df, "fan_speed", "comp_freq"):
+        return None
+    run = df[df["comp_freq"].fillna(0) > 10]
+    if len(run) < _MIN_ACTIVE:
+        return None
+    stalled = float((run["fan_speed"].fillna(0) <= 0).mean())
+    ev = float(np.clip((stalled - 0.05) / (0.5 - 0.05), 0, 1))
+    return (_prob(ev), f"fan stalled {stalled*100:.0f}% under load", {})
+
+
+def _s_low_eff(df):
+    if not _has(df, "power", "comp_freq"):
+        return None
+    run = df[(df["comp_freq"].fillna(0) > 10) & (df["power"].fillna(0) > 0.1)].copy()
+    if _span_days(run["timestamp"]) < 2.0 or len(run) < 100:
+        return None
+    run["eff"] = run["comp_freq"] / run["power"]
+    hourly = run.set_index("timestamp")["eff"].resample("1h").median().dropna()
+    if len(hourly) < 6:
+        return None
+    slope = _slope_per_day(hourly.index.to_series(), hourly)
+    base = float(hourly.iloc[:3].mean())
+    if slope is None or base <= 0:
+        return None
+    frac = slope / base
+    ev = float(np.clip((-frac - 0.03) / (0.15 - 0.03), 0, 1))
+    return (_prob(ev), f"efficiency trend {frac*100:.1f}%/day", {})
+
+
+def _sys_mode_conflict(df):
+    iu = df[(df["unit_role"] == "IU") & df["mode"].notna()]
+    if iu.empty:
+        return None
+    piv = iu.pivot_table(index="timestamp", columns="unit_id", values="mode", aggfunc="first")
+    conflict = (piv == "cool").any(axis=1) & (piv == "heat").any(axis=1)
+    ev = float(min(1.0, (conflict.mean() if len(conflict) else 0.0) * 4))
+    return (_prob(ev), f"{int(conflict.sum())} simultaneous heat/cool timestamps", {})
+
+
 SCORERS = {
     "R01_undercharge": _s_undercharge,
     "R02_overcharge": _s_overcharge,
+    "R03_leak_trend": _s_leak_trend,
     "R04_high_discharge": _s_high_discharge,
     "R05_hp_trip_risk": _s_hp_trip,
     "R06_lp_trip_risk": _s_lp_trip,
     "R07_lev_fault": _s_lev_fault,
     "R08_short_cycling": _s_short_cycling,
+    "R09_excess_defrost": _s_excess_defrost,
     "R10_dirty_condenser": _s_dirty_condenser,
+    "R11_low_indoor_airflow": _s_low_airflow,
     "R12_evap_icing": _s_evap_icing,
     "R13_sensor_fault": _s_sensor_fault,
+    "R14_comm_error": _s_comm,
+    "R15_reversing_valve": _s_reversing,
+    "R16_oil_return": _s_oil_return,
     "R17_high_current": _s_high_current,
     "R18_inverter_overheat": _s_inverter_overheat,
+    "R20_part_load": _s_part_load,
     "R21_comfort_deviation": _s_comfort,
+    "R22_fan_degradation": _s_fan,
+    "R23_low_efficiency": _s_low_eff,
     "R24_ambient_limits": _s_ambient_limits,
     "R25_fault_rollup": _s_fault_rollup,
+}
+
+# system-scoped scorers receive the whole system's rows at once
+SYSTEM_SCORERS = {
+    "R19_mode_conflict": _sys_mode_conflict,
 }
 
 
@@ -311,6 +478,28 @@ def score_system(df: pd.DataFrame) -> list[ModeProbability]:
     results: list[ModeProbability] = []
 
     for spec in CATALOG:
+        # system-scoped modes see the whole system at once
+        if spec.rule_id in SYSTEM_SCORERS:
+            best, assessable = None, False
+            for _sys, grp in df.groupby("system_id", dropna=False):
+                out = SYSTEM_SCORERS[spec.rule_id](grp.sort_values("timestamp"))
+                if out is None:
+                    continue
+                assessable = True
+                if best is None or out[0] > best[0]:
+                    best = (out[0], "*", out[1], out[2])
+            if not assessable:
+                results.append(ModeProbability(
+                    spec.rule_id, spec.title, spec.category, None, "insufficient_data",
+                    spec.default_severity.label,
+                    rationale="required signals not present in this dataset"))
+            else:
+                results.append(ModeProbability(
+                    spec.rule_id, spec.title, spec.category, round(best[0], 1), "assessed",
+                    spec.default_severity.label, unit_id=best[1], rationale=best[2],
+                    evidence=best[3]))
+            continue
+
         scorer = SCORERS.get(spec.rule_id)
         if scorer is None:
             status = "not_implemented" if not spec.implemented else "insufficient_data"
