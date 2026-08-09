@@ -10,7 +10,7 @@ from vrf_analyzer.rules.detectors import (
     HighCompressorCurrent, InverterOverheat,
     RefrigerantUndercharge, RefrigerantOvercharge, AmbientLimits,
     PartLoadOversizing, OilReturnProblem, ReversingValveFault,
-    ModeConflict, RefrigerantLeakTrend,
+    ModeConflict, RefrigerantLeakTrend, ValveLeakThrough,
 )
 
 
@@ -112,6 +112,26 @@ def test_reversing_valve_wrong_direction():
     iu["mode"] = "cool"  # coil hotter than room while cooling -> fault
     f = ReversingValveFault().run(iu)
     assert len(f) == 1
+
+
+def test_valve_leak_through_cold_off_zone():
+    n = 120
+    ou = _frame(n=n, evap_temp=np.full(n, 3.0))
+    iu = _frame(n=n, role=UnitRole.INDOOR, unit_id="IC-1",
+                room_temp=np.full(n, 24.0),
+                liquid_pipe_temp=np.full(n, 4.0),   # tracking evap, not room
+                gas_pipe_temp=np.full(n, 5.0),
+                lev_pulse=np.full(n, 60.0))         # commanded closed
+    iu["mode"] = "off"
+    iu["comp_freq"] = np.nan
+    f = ValveLeakThrough().run(pd.concat([ou, iu], ignore_index=True))
+    assert len(f) == 1 and f[0].unit_id == "IC-1"
+    assert f[0].severity == Severity.HIGH  # pipes track evap temp
+    # healthy off zone: pipes at room temperature
+    iu2 = iu.copy()
+    iu2["liquid_pipe_temp"] = 23.8
+    iu2["gas_pipe_temp"] = 24.1
+    assert ValveLeakThrough().run(pd.concat([ou, iu2], ignore_index=True)) == []
 
 
 def test_mode_conflict_system_scope():

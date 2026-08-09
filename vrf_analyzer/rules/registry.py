@@ -8,11 +8,14 @@ from .base import Detector, Finding
 from .catalog import CATALOG, CATALOG_BY_ID, RuleSpec
 from .detectors import IMPLEMENTED_DETECTORS
 
-# rule_id -> Detector class
-REGISTRY: dict[str, type[Detector]] = {d.spec.rule_id: d for d in IMPLEMENTED_DETECTORS}
+# rule_id -> Detector classes (a rule may have several detectors, e.g. R07 has
+# both the stuck/erratic check and the system-scoped leak-through check)
+REGISTRY: dict[str, list[type[Detector]]] = {}
+for _det in IMPLEMENTED_DETECTORS:
+    REGISTRY.setdefault(_det.spec.rule_id, []).append(_det)
 
 # mark catalog coverage
-for _rid, _det in REGISTRY.items():
+for _rid in REGISTRY:
     CATALOG_BY_ID[_rid].implemented = True
 
 
@@ -24,7 +27,8 @@ def coverage() -> list[RuleSpec]:
 def build_detectors(overrides: dict | None = None) -> list[Detector]:
     """Instantiate all implemented detectors. ``overrides`` maps rule_id->params."""
     overrides = overrides or {}
-    return [cls(**overrides.get(rid, {})) for rid, cls in REGISTRY.items()]
+    return [cls(**overrides.get(rid, {}))
+            for rid, classes in REGISTRY.items() for cls in classes]
 
 
 def assess_unit(df: pd.DataFrame, detectors: list[Detector] | None = None) -> list[Finding]:

@@ -475,6 +475,87 @@ class LEVFault(Detector):
         return []
 
 
+class ValveLeakThrough(Detector):
+    """Expansion valve not sealing: refrigerant bleeds through an OFF zone.
+
+    System-scoped: needs the OU's compressor state and evaporating temperature
+    alongside each IU's pipe temps. Signature: zone off (valve commanded to its
+    minimum) while the compressor serves other zones, yet the zone's coil pipes
+    run well below room temperature -- toward the evaporating temperature --
+    long after the post-shutoff cooldown. Shares rule R07 (valve stuck/erratic):
+    a valve stuck partially open IS a leaky valve.
+    """
+
+    scope = "system"
+    spec = CATALOG_BY_ID["R07_lev_fault"]
+    params = {
+        "depress_k": 5.0,        # pipes this far below room temp = leak-through
+        "cooldown_samples": 15,  # ignore residual cold right after switch-off
+        "min_episode": 5,
+        "min_duty": 0.10,        # fraction of eligible off-time
+        "near_evap_k": 3.0,      # pipes tracking evap temp -> strong evidence
+        "lev_closed": 70,
+    }
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        p = self.params
+        ou = df[df["unit_role"] == "OU"]
+        if ou.empty or not _has(ou, "comp_freq"):
+            return []
+        ou_ts = ou.sort_values("timestamp").set_index("timestamp")
+        out: list[Finding] = []
+        for uid, g in df[df["unit_role"] == "IU"].groupby("unit_id"):
+            g = g.sort_values("timestamp").reset_index(drop=True)
+            if not _has(g, "room_temp") or not (
+                _has(g, "liquid_pipe_temp") or _has(g, "gas_pipe_temp")
+            ):
+                continue
+            comp = ou_ts["comp_freq"].reindex(g["timestamp"], method="nearest").to_numpy()
+            evap = (ou_ts["evap_temp"].reindex(g["timestamp"], method="nearest").to_numpy()
+                    if "evap_temp" in ou_ts else np.full(len(g), np.nan))
+            off = (g["mode"] == "off") | g["mode"].isna()
+            grp = off.ne(off.shift()).cumsum()
+            mins_off = off.groupby(grp).cumcount() + 1
+            closed = (g["lev_pulse"] <= p["lev_closed"]) if _has(g, "lev_pulse") \
+                else pd.Series(True, index=g.index)
+            eligible = (off & (mins_off > p["cooldown_samples"]) & closed
+                        & pd.Series(comp > 0, index=g.index))
+            if int(eligible.sum()) < 30:
+                continue
+            coldest = pd.concat(
+                [g.get("liquid_pipe_temp"), g.get("gas_pipe_temp")], axis=1
+            ).min(axis=1)
+            depress = g["room_temp"] - coldest
+            leak = (eligible & (depress > p["depress_k"])).fillna(False)
+            episodes = list(_contiguous_windows(leak, g["timestamp"], p["min_episode"]))
+            duty = float(leak[eligible].mean())
+            if not episodes or duty < p["min_duty"]:
+                continue
+            near = float((np.abs(coldest.to_numpy() - evap)[leak.to_numpy()]
+                          < p["near_evap_k"]).mean()) if leak.any() else 0.0
+            sev = Severity.HIGH if (duty > 0.5 or near > 0.3) else Severity.MEDIUM
+            total = sum(n for _, _, n in episodes)
+            out.append(Finding(
+                rule_id=self.spec.rule_id,
+                title="Expansion valve leak-through (not sealing when off)",
+                severity=sev,
+                system_id=str(g["system_id"].iloc[0]), unit_id=str(uid),
+                start=episodes[0][0], end=episodes[-1][1],
+                message=(f"Coil pipes ran >{p['depress_k']:.0f} K below room temp "
+                         f"during {duty*100:.0f}% of off-while-running time "
+                         f"({len(episodes)} episodes, {total} samples"
+                         + (f"; pipes tracked evaporating temp {near*100:.0f}% "
+                            f"of leak time" if near > 0 else "") + ")."),
+                recommendation=("Valve passing refrigerant while commanded closed: "
+                                "inspect/exercise this zone's LEV (or branch-box "
+                                "port), check the coil and connector; verify with "
+                                "a clamp thermometer during an off cycle."),
+                metrics={"duty_fraction": round(duty, 3), "episodes": len(episodes),
+                         "near_evap_frac": round(near, 3)},
+            ))
+        return out
+
+
 class DirtyCondenser(Detector):
     """Elevated condensing approach (cond_temp - ambient) in cooling -> a fouled
     or airflow-restricted outdoor coil.
@@ -1004,6 +1085,7 @@ IMPLEMENTED_DETECTORS = [
     HighPressureTripRisk,
     LowPressureTripRisk,
     LEVFault,
+    ValveLeakThrough,
     DirtyCondenser,
     EvaporatorIcing,
     HighCompressorCurrent,

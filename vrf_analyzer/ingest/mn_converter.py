@@ -214,14 +214,19 @@ def read_mn_converter(path: str, refrigerant: str = "R410A") -> pd.DataFrame:
         if sc_k is not None and pd.to_numeric(sc_k, errors="coerce").abs().sum() > 0:
             iu["subcool"] = pd.to_numeric(sc_k, errors="coerce")
 
-        # mask indoor pipe temps to active periods (state contains 'ON')
+        # 'Cool OFF' / 'Heat OFF' means thermo-off: the zone is selected but not
+        # demanding. Normalize those to mode 'off' so duty/active logic reflects
+        # actual demand ('Cool ON' -> cool, 'Cool OFF' -> off, 'Stop' -> off).
         active = (
             state_col.str.upper().str.contains("ON", na=False)
             if state_col is not None
             else pd.Series(True, index=iu.index)
         )
-        for sig in ("liquid_pipe_temp", "gas_pipe_temp"):
-            iu[sig] = iu[sig].where(active)
+        if state_col is not None:
+            iu.loc[~active & state_col.str.upper().str.contains("OFF|STOP", na=False),
+                   "mode"] = Mode.OFF.value
+        # NOTE: pipe temps are intentionally NOT masked to active periods --
+        # cold pipes on an off zone are the leak-through signature (R07).
         # per-zone suction superheat = indoor gas-pipe temp - system evap temp
         iu["superheat"] = np.where(
             active.to_numpy() & ~np.isnan(evap),
