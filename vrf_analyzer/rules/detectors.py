@@ -49,70 +49,85 @@ def _active_mask(df: pd.DataFrame) -> pd.Series:
 
 
 class RefrigerantUndercharge(Detector):
-    """Chronic low-subcool / high-superheat -> undercharge.
+    """Low subcooling -> possible undercharge, using VRF (LEV) charge logic.
 
-    Reported as ONE aggregated finding per unit with a duty-cycle metric, rather
-    than one per contiguous window, because undercharge is a persistent state.
-    Uses the reported subcool target (SCm) when present for stronger evidence.
+    On a LEV/TXV system the expansion valve holds evaporator superheat roughly
+    constant, so superheat is NOT an independent charge indicator -- charge is
+    judged by subcooling. This detector therefore triggers on persistently low
+    subcooling during compressor operation, and only escalates to HIGH when
+    superheat is *also* elevated (the LEV has run out of travel and can no longer
+    maintain superheat -- the classic starved/undercharged state).
+
+    Reference ranges (R410A): normal subcooling ~4.5-8.5 K; normal evaporator
+    superheat ~5-15 K. Reported as one aggregated, duty-cycle finding per unit.
     """
 
     spec = CATALOG_BY_ID["R01_undercharge"]
     params = {
-        "min_subcool_k": 2.0,
-        "max_superheat_k": 12.0,
-        "min_duty": 0.15,        # fraction of running time in the fault state
+        "low_subcool_k": 3.0,        # below typical target subcooling band
+        "high_superheat_k": 15.0,    # LEV saturating -> escalate
+        "min_duty": 0.30,            # fraction of running time with low subcool
+        "escalate_superheat_duty": 0.30,
         "min_running_samples": 30,
     }
 
     def run(self, df: pd.DataFrame) -> list[Finding]:
-        if not _has(df, "subcool", "superheat"):
+        if not _has(df, "subcool"):
             return []
         p = self.params
-        run = df[_active_mask(df) & df["subcool"].notna() & df["superheat"].notna()]
+        run = df[_active_mask(df) & df["subcool"].notna()]
         if len(run) < p["min_running_samples"]:
             return []
-        mask = (run["subcool"] < p["min_subcool_k"]) & (
-            run["superheat"] > p["max_superheat_k"]
-        )
-        duty = float(mask.mean())
+        low = run["subcool"] < p["low_subcool_k"]
+        duty = float(low.mean())
         if duty < p["min_duty"]:
             return []
-        bad = run[mask]
+        bad = run[low]
         avg_sc = float(bad["subcool"].mean())
-        avg_sh = float(bad["superheat"].mean())
-        target = (
-            float(run["subcool_target"].dropna().median())
-            if _has(run, "subcool_target") else None
-        )
-        sev = Severity.HIGH if duty >= 0.4 else Severity.MEDIUM
-        tgt_txt = f" vs {target:.0f} K target" if target is not None else ""
+
+        # optional superheat corroboration
+        sh_txt, sh_duty, avg_sh = "", 0.0, None
+        if _has(run, "superheat"):
+            sh = run.loc[low, "superheat"].dropna()
+            if len(sh):
+                avg_sh = float(sh.mean())
+                sh_duty = float((sh > p["high_superheat_k"]).mean())
+
+        if avg_sh is not None and sh_duty >= p["escalate_superheat_duty"]:
+            sev = Severity.HIGH
+            msg = (f"Undercharge: subcool low (avg {avg_sc:.1f} K) with elevated "
+                   f"superheat (avg {avg_sh:.1f} K) during {duty*100:.0f}% of run "
+                   f"time -- LEV can no longer hold superheat.")
+        else:
+            sev = Severity.MEDIUM
+            sh_txt = f" (superheat avg {avg_sh:.1f} K, normal)" if avg_sh is not None else ""
+            msg = (f"Persistently low subcooling (avg {avg_sc:.1f} K) during "
+                   f"{duty*100:.0f}% of run time{sh_txt} -- verify charge against "
+                   f"commissioning data.")
+
         return [self._finding(
             df, start=bad["timestamp"].min(), end=bad["timestamp"].max(),
-            severity=sev,
-            message=(
-                f"Undercharge signature during {duty*100:.0f}% of run time: "
-                f"subcool avg {avg_sc:.1f} K{tgt_txt} with superheat avg "
-                f"{avg_sh:.1f} K."
-            ),
+            severity=sev, message=msg,
             recommendation=(
-                "Check for a refrigerant leak and verify charge against "
-                "commissioning data; inspect service ports, flare joints, and "
-                "the subcool sensor before adding refrigerant."
+                "For this LEV system, judge charge by subcooling: compare against "
+                "the commissioning/target subcool. If confirmed low, check for a "
+                "leak and inspect the subcool sensor before adding refrigerant."
             ),
             metrics={
                 "duty_fraction": round(duty, 3),
                 "avg_subcool_k": round(avg_sc, 2),
-                "target_subcool_k": None if target is None else round(target, 1),
-                "avg_superheat_k": round(avg_sh, 2),
+                "avg_superheat_k": None if avg_sh is None else round(avg_sh, 2),
+                "superheat_high_duty": round(sh_duty, 3),
                 "running_samples": int(len(run)),
-                "fault_samples": int(len(bad)),
             },
         )]
 
 
 class HighDischargeTemp(Detector):
+    # PUMY-P / R410A: discharge (TH4) limiting begins ~110 C, compressor stop
+    # protection ~125 C. Warn at the limiting point, critical near the stop.
     spec = CATALOG_BY_ID["R04_high_discharge"]
-    params = {"limit_c": 110.0, "critical_c": 120.0, "min_samples": 3}
+    params = {"limit_c": 110.0, "critical_c": 125.0, "min_samples": 3}
 
     def run(self, df: pd.DataFrame) -> list[Finding]:
         if not _has(df, "discharge_temp"):
@@ -273,8 +288,10 @@ class HighPressureTripRisk(Detector):
     """High side approaching the high-pressure cutout (R410A ~4.15 MPa)."""
 
     spec = CATALOG_BY_ID["R05_hp_trip_risk"]
-    # gauge kPa; R410A HP switch ~4.15 MPa abs -> ~4050 kPa gauge. Warn at 90%.
-    params = {"warn_kpa": 3650.0, "critical_kpa": 3950.0, "min_samples": 3}
+    # R410A high-pressure switch (63H) cutout = 4.15 MPa (601 psi), gauge.
+    # Warn at ~87% (3600 kPa), critical at ~95% (3950 kPa) of the cutout.
+    params = {"cutout_kpa": 4150.0, "warn_kpa": 3600.0,
+              "critical_kpa": 3950.0, "min_samples": 3}
 
     def run(self, df: pd.DataFrame) -> list[Finding]:
         if not _has(df, "high_pressure"):
@@ -493,6 +510,48 @@ class InverterOverheat(Detector):
         return out
 
 
+class AmbientLimits(Detector):
+    """Operation outside the unit's rated outdoor-temperature envelope.
+
+    PUMY-P NKMU guaranteed range: cooling -5...46 C, heating -25...21 C.
+    Operating beyond these voids performance guarantees and stresses the system.
+    """
+
+    spec = CATALOG_BY_ID["R24_ambient_limits"]
+    params = {
+        "cool_min_c": -5.0, "cool_max_c": 46.0,
+        "heat_min_c": -25.0, "heat_max_c": 21.0,
+        "min_samples": 10,
+    }
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        if not _has(df, "outdoor_temp", "mode"):
+            return []
+        p = self.params
+        out: list[Finding] = []
+        for mode, lo, hi in (("cool", p["cool_min_c"], p["cool_max_c"]),
+                             ("heat", p["heat_min_c"], p["heat_max_c"])):
+            sel = df["mode"] == mode
+            if not sel.any():
+                continue
+            temp = df["outdoor_temp"].where(sel)
+            mask = ((temp < lo) | (temp > hi)).fillna(False)
+            for start, end, n in _contiguous_windows(mask, df["timestamp"], p["min_samples"]):
+                win = temp[(df["timestamp"] >= start) & (df["timestamp"] <= end)]
+                out.append(self._finding(
+                    df, start=start, end=end, severity=Severity.LOW,
+                    message=(f"Operating in {mode} with outdoor temp outside the "
+                             f"{lo:.0f}..{hi:.0f} C rated range "
+                             f"(min {win.min():.1f} / max {win.max():.1f} C) "
+                             f"for {n} samples."),
+                    recommendation=("Expect reduced capacity/efficiency; confirm "
+                                    "the application suits these conditions."),
+                    metrics={"mode": mode, "min_c": round(float(win.min()), 1),
+                             "max_c": round(float(win.max()), 1), "samples": n},
+                ))
+        return out
+
+
 class FaultCodeRollup(Detector):
     spec = CATALOG_BY_ID["R25_fault_rollup"]
     params = {"ok_values": {"", "0", "00", "nan", "none", "-"}}
@@ -530,5 +589,6 @@ IMPLEMENTED_DETECTORS = [
     CompressorShortCycling,
     ComfortDeviation,
     ThermistorFault,
+    AmbientLimits,
     FaultCodeRollup,
 ]

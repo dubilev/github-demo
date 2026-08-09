@@ -4,9 +4,11 @@ import numpy as np
 import pandas as pd
 
 from vrf_analyzer.schema import ALL_COLUMNS, UnitRole
+from vrf_analyzer.rules.base import Severity
 from vrf_analyzer.rules.detectors import (
     LEVFault, DirtyCondenser, EvaporatorIcing,
     HighCompressorCurrent, InverterOverheat,
+    RefrigerantUndercharge, AmbientLimits,
 )
 
 
@@ -55,6 +57,29 @@ def test_high_compressor_current_fires():
     assert len(f) == 1
     normal = _frame(comp_freq=freq, comp_current=np.full(120, 40 * 0.5))
     assert HighCompressorCurrent().run(normal) == []
+
+
+def test_undercharge_vrf_logic_severity():
+    # low subcool + NORMAL superheat -> Medium "verify charge" (LEV logic)
+    mild = _frame(subcool=1.0, superheat=6.0)
+    f = RefrigerantUndercharge().run(mild)
+    assert len(f) == 1 and f[0].severity == Severity.MEDIUM
+    # low subcool + HIGH superheat -> High undercharge (LEV saturated)
+    severe = _frame(subcool=1.0, superheat=22.0)
+    f2 = RefrigerantUndercharge().run(severe)
+    assert len(f2) == 1 and f2[0].severity == Severity.HIGH
+    # healthy subcool -> nothing
+    assert RefrigerantUndercharge().run(_frame(subcool=6.0, superheat=6.0)) == []
+
+
+def test_ambient_limits_fires_outside_cooling_range():
+    df = _frame(outdoor_temp=np.r_[np.full(20, 50.0), np.full(100, 35.0)])
+    df["mode"] = "cool"
+    f = AmbientLimits().run(df)
+    assert len(f) == 1 and f[0].metrics["max_c"] >= 46
+    inrange = _frame(outdoor_temp=35.0)
+    inrange["mode"] = "cool"
+    assert AmbientLimits().run(inrange) == []
 
 
 def test_lev_fault_underfed_zone():

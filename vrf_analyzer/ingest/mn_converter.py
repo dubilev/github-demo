@@ -29,13 +29,17 @@ import pandas as pd
 from ..refrigerant import psi_gauge_to_kpa_gauge, sat_temp_from_gauge
 from ..schema import ALL_COLUMNS, Mode, UnitRole
 
-# OU column name (as it appears in the header) -> canonical signal
+# OU column name (as it appears in the header) -> canonical signal.
+# Thermistor roles per the PUMY-P NKMU technical & service manual:
+#   TH2 = HIC pipe, TH3 = outdoor liquid pipe, TH4 = compressor discharge,
+#   TH6 = suction pipe, TH7 = ambient, TH8 = heat sink.
 _OU_MAP = {
-    "TH2": "suction_temp",       # accumulator/suction gas temp
+    "TH2": "hic_pipe_temp",      # HIC (subcool heat-exchanger) pipe
     "TH3": "liquid_pipe_temp",   # outdoor coil liquid temp
     "TH4": "discharge_temp",     # compressor discharge
+    "TH6": "suction_temp",       # suction pipe
     "TH7": "outdoor_temp",       # ambient
-    "TH8": "heatsink_temp",      # inverter/HIC heatsink (tentative)
+    "TH8": "heatsink_temp",      # inverter heat sink
     "63HS": "high_pressure",     # high side (psi gauge -> kPa)
     "63LS": "low_pressure",      # low side  (psi gauge -> kPa)
     "W(comp)": "power",          # compressor watts -> kW

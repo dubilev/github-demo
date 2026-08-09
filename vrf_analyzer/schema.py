@@ -51,7 +51,8 @@ SIGNALS: dict[str, str] = {
     "liquid_pipe_temp": "degC",
     "gas_pipe_temp": "degC",
     "discharge_temp": "degC",      # compressor discharge (TH4)
-    "suction_temp": "degC",
+    "suction_temp": "degC",        # suction pipe (TH6 on PUMY-P)
+    "hic_pipe_temp": "degC",       # HIC / subcool heat-exchanger pipe (TH2)
     "heatsink_temp": "degC",       # inverter heatsink (THHS)
     "cond_temp": "degC",           # condensing temperature (saturated, from HP)
     "evap_temp": "degC",           # evaporating temperature (saturated, from LP)

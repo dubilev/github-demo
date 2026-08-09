@@ -53,6 +53,15 @@ def test_derived_cycle_fields_present_and_sane():
     assert run["cond_temp"].median() > run["evap_temp"].median()
 
 
+def test_thermistor_mapping_th6_suction_th2_hic():
+    # Per the PUMY-P manual: TH6=suction (cool, single digits), TH2=HIC (warmer).
+    df = load_csv(SAMPLE)
+    run = df[(df["unit_role"] == "OU") & (df["comp_freq"] > 0)]
+    assert run["suction_temp"].median() < run["hic_pipe_temp"].median()
+    # suction superheat from TH6 lands in a physically normal band, not ~23 K
+    assert 0 < run["superheat"].median() < 15
+
+
 def test_refrigerant_saturation_monotonic():
     # higher pressure -> higher saturation temperature
     lo = sat_temp_from_gauge(800, "R410A")

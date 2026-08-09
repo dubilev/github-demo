@@ -5,12 +5,14 @@ Mitsubishi tools, **indexes** them into a fast columnar store, and **assesses**
 the data against the **top 25 issues** common to VRF systems — surfacing findings
 with severity, evidence, and recommended action in a web dashboard.
 
-> Status: **working prototype**. 13 of the 25 detectors are implemented
-> end-to-end; the remaining 12 are catalogued and wired, ready to implement.
+> Status: **working prototype**. 14 of the 25 detectors are implemented
+> end-to-end; the remaining 11 are catalogued and wired, ready to implement.
 > The parser reads real **Mitsubishi MN Converter** service exports
 > (auto-detected), converts R410A/R32 pressures to saturation temperatures, and
 > derives system- and per-zone subcooling/superheat plus per-zone expansion-valve
-> position for refrigerant-cycle diagnostics.
+> position for refrigerant-cycle diagnostics. Thermistor roles and protection
+> thresholds are taken from the **PUMY-P NKMU technical & service manual**
+> (see [References](#references)).
 
 ## Pipeline
 
@@ -60,11 +62,27 @@ Run `vrf catalog`, or see `vrf_analyzer/rules/catalog.py`. Categories cover
 refrigerant charge/leaks, pressures, compressor & electrical health, expansion
 valves, airflow/coils, sensors, controls/communication, comfort, and efficiency.
 
-**Live detectors in this prototype (13/25):** refrigerant undercharge, high
+**Live detectors in this prototype (14/25):** refrigerant undercharge, high
 discharge temperature, high-/low-pressure trip risk, expansion-valve (LEV)
 fault, dirty/blocked condenser, evaporator icing, high compressor current,
 inverter/heatsink overheat, compressor short-cycling, room-temp comfort
-deviation, thermistor drift/failure, and fault-code rollup.
+deviation, thermistor drift/failure, operation outside ambient limits, and
+fault-code rollup.
+
+### Diagnostic logic notes
+
+- **Charge is judged by subcooling, not superheat.** On a LEV/TXV system the
+  expansion valve holds evaporator superheat roughly constant, so superheat is
+  not an independent charge indicator. The undercharge detector triggers on
+  persistently low subcooling and only escalates to High when superheat is
+  *also* elevated (the LEV has run out of travel).
+- **Thresholds are manufacturer-grounded:** discharge (TH4) limiting ~110 °C /
+  stop ~125 °C; high-pressure switch 4.15 MPa (601 psi); cooling envelope
+  −5…46 °C, heating −25…21 °C; normal R410A superheat ~5–15 K, subcool
+  ~4.5–8.5 K.
+- **Thermistor roles** (PUMY-P): TH2 = HIC pipe, TH3 = outdoor liquid pipe,
+  TH4 = compressor discharge, TH6 = suction pipe, TH7 = ambient, TH8 = heat
+  sink.
 
 ## Supported formats
 
@@ -86,10 +104,11 @@ derived from the indoor gas-pipe thermistor and the system evaporating
 temperature. (`SCm`/`SCm{k}` "subcool target" is a dummy placeholder in these
 exports and is deliberately ignored.)
 
-On the sample PUMY-P36/48 export, the tool flags a real **refrigerant
-undercharge** signature (subcooling averaging ~1 K with ~23 K suction superheat)
-and the resulting **evaporator icing risk** (evaporating temperature dipping to
-−9 °C during low-load operation).
+On the sample PUMY-P36/48 export, the tool flags **persistently low subcooling**
+(averaging ~1.2 K during 64% of run time, with normal ~6.7 K suction superheat) —
+a "verify charge against commissioning" finding rather than a hard fault — plus
+an **evaporator icing risk** (evaporating temperature dipping to −9 °C during
+low-load operation).
 
 ## Adapting to your CSV format
 
@@ -123,3 +142,21 @@ pytest -q
   the actual refrigerant (e.g. R410A/R32) for charge & coil diagnostics.
 - Multi-day trend detectors (leak, COP degradation).
 - Per-detector threshold calibration UI and exportable PDF reports.
+
+## References
+
+Thermistor definitions, protection setpoints, and operating ranges used to
+ground the detectors:
+
+- Mitsubishi Electric PUMY-P NKMU / PUMY-P200YKM Technical & Service Manuals
+  (thermistor feature chart: TH2 HIC pipe, TH3 outdoor liquid, TH4 compressor,
+  TH6 suction, TH7 ambient, TH8 heat sink; operating ranges; protection logic).
+- R410A high-pressure switch cutout 4.15 MPa (601 psi) — R410A max operating
+  pressure per Mitsubishi PUMY-P NKMU documentation.
+- Discharge-temperature compressor protection (~110 °C limiting, ~125 °C stop)
+  for Mitsubishi R410A systems.
+- R410A superheat/subcooling reference ranges and the principle that TXV/LEV
+  systems are charged by subcooling (superheat held constant by the valve).
+
+Numeric thresholds live in each detector's `params` and can be recalibrated per
+model without code changes.
