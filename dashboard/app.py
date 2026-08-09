@@ -23,6 +23,7 @@ from vrf_analyzer.index import IndexStore  # noqa: E402
 from vrf_analyzer.ingest import load_csv, PROFILES  # noqa: E402
 from vrf_analyzer.report import summarize  # noqa: E402
 from vrf_analyzer.rules import assess, coverage, findings_to_frame, Severity  # noqa: E402
+from vrf_analyzer.scoring import score_system, probabilities_to_frame  # noqa: E402
 
 st.set_page_config(page_title="Mitsubishi VRF Analyzer", page_icon="", layout="wide")
 
@@ -91,9 +92,39 @@ c4.metric("Max severity", summary["max_severity"] or "None")
 crit = summary["by_severity"].get("Critical", 0) + summary["by_severity"].get("High", 0)
 c5.metric("High/Critical", crit)
 
-tab_findings, tab_explore, tab_catalog = st.tabs(
-    ["Findings", "Signal explorer", "Issue catalog (top 25)"]
+tab_prob, tab_findings, tab_explore, tab_catalog = st.tabs(
+    ["Failure-mode probability", "Findings", "Signal explorer", "Issue catalog (top 25)"]
 )
+
+# --- probability tab -------------------------------------------------------
+with tab_prob:
+    scores = score_system(df)
+    pdf = probabilities_to_frame(scores)
+    assessed = pdf[pdf["status"] == "assessed"].sort_values("probability_%", ascending=True)
+    if not assessed.empty:
+        fig = px.bar(
+            assessed, x="probability_%", y="title", orientation="h",
+            color="probability_%", color_continuous_scale="OrRd",
+            range_color=(0, 100), range_x=(0, 100),
+            hover_data=["rule_id", "unit_id", "rationale"],
+            labels={"probability_%": "probability present (%)", "title": ""},
+        )
+        fig.update_layout(height=460, margin=dict(l=0, r=0, t=10, b=0),
+                          coloraxis_showscale=False)
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("Heuristic confidence that each failure mode is present, from "
+                   "graded signal evidence — not a statistically calibrated probability.")
+        st.dataframe(
+            assessed.sort_values("probability_%", ascending=False)[
+                ["probability_%", "rule_id", "title", "severity_if_present",
+                 "unit_id", "rationale"]],
+            use_container_width=True, hide_index=True,
+        )
+    na = pdf[pdf["status"] != "assessed"]
+    if not na.empty:
+        st.caption("Not assessable with this dataset")
+        st.dataframe(na[["rule_id", "title", "status", "rationale"]],
+                     use_container_width=True, hide_index=True)
 
 # --- findings tab ----------------------------------------------------------
 with tab_findings:

@@ -48,6 +48,7 @@ vrf catalog
 # 3. Point it at your own CSVs
 vrf index path/to/logs/            # a file or a directory
 vrf assess --report findings.json
+vrf risk                           # probability each failure mode is present
 
 # 4. Launch the dashboard (good UI)
 streamlit run dashboard/app.py
@@ -55,6 +56,19 @@ streamlit run dashboard/app.py
 
 The dashboard also runs standalone on **synthetic demo data** with no setup —
 useful for exploring the UI before wiring in real logs.
+
+## Failure-mode probability
+
+Beyond pass/fail findings, `vrf risk` (and the dashboard's **Failure-mode
+probability** tab) reports a graded **probability that each of the 25 modes is
+present**, ranked. Each mode's evidence is a per-sample severity ramp between a
+`warn` level (condition starts to matter) and a `fail` level (clearly present),
+aggregated over active operation by blending persistence with intensity. Healthy
+axes sit near a 1% floor; borderline conditions show honest mid-range values;
+modes whose signals are absent, or whose detector is not yet implemented, are
+labelled rather than shown as 0%. This is a transparent heuristic confidence,
+**not** a statistically calibrated probability — every score ships with the
+evidence behind it (see `vrf_analyzer/scoring.py`).
 
 ## The top 25 issues
 

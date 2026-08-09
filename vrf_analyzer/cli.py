@@ -56,6 +56,30 @@ def assess_cmd(
 
 
 @app.command()
+def risk(
+    index_dir: str = typer.Option(DEFAULT_INDEX, "--index", help="Index directory."),
+):
+    """Show the probability that each of the 25 failure modes is present."""
+    from .scoring import score_system, probabilities_to_frame
+    store = IndexStore(index_dir)
+    if not store.exists():
+        typer.echo(f"No index at {index_dir!r}. Run `vrf index` first.", err=True)
+        raise typer.Exit(1)
+    scores = score_system(store.read())
+    frame = probabilities_to_frame(scores)
+    assessed = frame[frame["status"] == "assessed"]
+    typer.echo("Failure-mode probability (present in system):")
+    for _, r in assessed.iterrows():
+        bar = "#" * int(round((r["probability_%"] or 0) / 5))
+        typer.echo(f"  {r['probability_%']:5.1f}%  {bar:<20s} {r['rule_id']:20s} {r['title']}")
+    na = frame[frame["status"] != "assessed"]
+    if not na.empty:
+        typer.echo("\nNot assessable:")
+        for _, r in na.iterrows():
+            typer.echo(f"    --   {r['rule_id']:20s} {r['title']} ({r['status']})")
+
+
+@app.command()
 def catalog():
     """List the top-25 issue catalog and which detectors are live."""
     for spec in coverage():
