@@ -80,15 +80,16 @@ deviation, thermistor drift/failure, and fault-code rollup.
 - A trimmed, serial-redacted real export is committed at
   `data/sample/mn_converter_sample.CSV` and drives the regression tests.
 
-Per-indoor `LEV{k}` (expansion-valve opening), `SC{k}`/`SCm{k}` (subcool, when
+Per-indoor `LEV{k}` (expansion-valve opening) and `SC{k}` (subcool, when
 populated) are mapped to each indoor unit, and per-zone suction superheat is
 derived from the indoor gas-pipe thermistor and the system evaporating
-temperature.
+temperature. (`SCm`/`SCm{k}` "subcool target" is a dummy placeholder in these
+exports and is deliberately ignored.)
 
 On the sample PUMY-P36/48 export, the tool flags a real **refrigerant
-undercharge** signature (subcooling averaging ~1 K against the unit's 10 K
-target with ~23 K suction superheat) and the resulting **evaporator icing risk**
-(evaporating temperature dipping to −9 °C during low-load operation).
+undercharge** signature (subcooling averaging ~1 K with ~23 K suction superheat)
+and the resulting **evaporator icing risk** (evaporating temperature dipping to
+−9 °C during low-load operation).
 
 ## Adapting to your CSV format
 
