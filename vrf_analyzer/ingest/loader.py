@@ -10,7 +10,13 @@ import numpy as np
 import pandas as pd
 
 from ..schema import ALL_COLUMNS, SIGNALS, UnitRole
-from .profiles import Profile, _parse_datetime, detect_profile, get_profile
+from .profiles import (
+    Profile,
+    _parse_datetime,
+    detect_profile,
+    get_profile,
+    sniff_raw_profile,
+)
 
 # signals that are numeric (everything with a physical unit that isn't enum/bool/code)
 _NUMERIC_SIGNALS = [
@@ -44,6 +50,17 @@ def load_csv(
     """
     if isinstance(profile, str):
         profile = get_profile(profile)
+
+    # reader-based profiles (complex layouts) short-circuit the generic path
+    if profile is None:
+        sniffed = sniff_raw_profile(path)
+        if sniffed is not None:
+            profile = sniffed
+    if profile is not None and profile.reader is not None:
+        df = profile.reader(path)
+        df.attrs.setdefault("source_file", os.path.basename(path))
+        df.attrs.setdefault("profile", profile.name)
+        return df
 
     raw = pd.read_csv(path, **(profile.read_kwargs if profile else {}))
     raw.columns = [str(c).strip() for c in raw.columns]

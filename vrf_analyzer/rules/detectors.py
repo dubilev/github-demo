@@ -31,37 +31,83 @@ def _contiguous_windows(mask: pd.Series, timestamps: pd.Series, min_len: int):
             yield timestamps.iloc[start], timestamps.iloc[end - 1], int(end - start)
 
 
+def _active_mask(df: pd.DataFrame) -> pd.Series:
+    """Rows where the unit is actually operating (so signals should be dynamic).
+
+    OU: compressor running. IU: mode not off. Falls back to 'all rows' when
+    neither signal is available.
+    """
+    active = pd.Series(False, index=df.index)
+    have_signal = False
+    if "comp_freq" in df and df["comp_freq"].notna().any():
+        active = active | (df["comp_freq"].fillna(0) > 0)
+        have_signal = True
+    if "mode" in df and df["mode"].notna().any():
+        active = active | (~df["mode"].isin(["off", None]) & df["mode"].notna())
+        have_signal = True
+    return active if have_signal else pd.Series(True, index=df.index)
+
+
 class RefrigerantUndercharge(Detector):
+    """Chronic low-subcool / high-superheat -> undercharge.
+
+    Reported as ONE aggregated finding per unit with a duty-cycle metric, rather
+    than one per contiguous window, because undercharge is a persistent state.
+    Uses the reported subcool target (SCm) when present for stronger evidence.
+    """
+
     spec = CATALOG_BY_ID["R01_undercharge"]
-    params = {"min_subcool_k": 2.0, "max_superheat_k": 12.0, "min_samples": 6}
+    params = {
+        "min_subcool_k": 2.0,
+        "max_superheat_k": 12.0,
+        "min_duty": 0.15,        # fraction of running time in the fault state
+        "min_running_samples": 30,
+    }
 
     def run(self, df: pd.DataFrame) -> list[Finding]:
         if not _has(df, "subcool", "superheat"):
             return []
         p = self.params
-        mask = (df["subcool"] < p["min_subcool_k"]) & (
-            df["superheat"] > p["max_superheat_k"]
+        run = df[_active_mask(df) & df["subcool"].notna() & df["superheat"].notna()]
+        if len(run) < p["min_running_samples"]:
+            return []
+        mask = (run["subcool"] < p["min_subcool_k"]) & (
+            run["superheat"] > p["max_superheat_k"]
         )
-        out: list[Finding] = []
-        for start, end, n in _contiguous_windows(mask, df["timestamp"], p["min_samples"]):
-            win = df[(df["timestamp"] >= start) & (df["timestamp"] <= end)]
-            out.append(self._finding(
-                df, start=start, end=end,
-                message=(
-                    f"Low subcool (avg {win['subcool'].mean():.1f} K) with high "
-                    f"superheat (avg {win['superheat'].mean():.1f} K) over {n} samples."
-                ),
-                recommendation=(
-                    "Check for refrigerant leak and verify charge against "
-                    "commissioning data; inspect service ports and flare joints."
-                ),
-                metrics={
-                    "avg_subcool_k": round(float(win["subcool"].mean()), 2),
-                    "avg_superheat_k": round(float(win["superheat"].mean()), 2),
-                    "samples": n,
-                },
-            ))
-        return out
+        duty = float(mask.mean())
+        if duty < p["min_duty"]:
+            return []
+        bad = run[mask]
+        avg_sc = float(bad["subcool"].mean())
+        avg_sh = float(bad["superheat"].mean())
+        target = (
+            float(run["subcool_target"].dropna().median())
+            if _has(run, "subcool_target") else None
+        )
+        sev = Severity.HIGH if duty >= 0.4 else Severity.MEDIUM
+        tgt_txt = f" vs {target:.0f} K target" if target is not None else ""
+        return [self._finding(
+            df, start=bad["timestamp"].min(), end=bad["timestamp"].max(),
+            severity=sev,
+            message=(
+                f"Undercharge signature during {duty*100:.0f}% of run time: "
+                f"subcool avg {avg_sc:.1f} K{tgt_txt} with superheat avg "
+                f"{avg_sh:.1f} K."
+            ),
+            recommendation=(
+                "Check for a refrigerant leak and verify charge against "
+                "commissioning data; inspect service ports, flare joints, and "
+                "the subcool sensor before adding refrigerant."
+            ),
+            metrics={
+                "duty_fraction": round(duty, 3),
+                "avg_subcool_k": round(avg_sc, 2),
+                "target_subcool_k": None if target is None else round(target, 1),
+                "avg_superheat_k": round(avg_sh, 2),
+                "running_samples": int(len(run)),
+                "fault_samples": int(len(bad)),
+            },
+        )]
 
 
 class HighDischargeTemp(Detector):
@@ -157,39 +203,126 @@ class ComfortDeviation(Detector):
 
 
 class ThermistorFault(Detector):
+    """Out-of-range or flatlined thermistors.
+
+    Flatline is only evaluated while the unit is *active* (so a satisfied,
+    stable zone is not mistaken for a stuck sensor) and excludes room-air
+    temperature, which legitimately holds steady. Findings are aggregated to one
+    per sensor per failure mode.
+    """
+
     spec = CATALOG_BY_ID["R13_sensor_fault"]
     params = {
-        "flatline_samples": 30,   # identical value run length
-        "min_c": -40.0, "max_c": 140.0,  # plausible range for pipe/room sensors
-        "sensors": ["room_temp", "liquid_pipe_temp", "gas_pipe_temp",
-                    "discharge_temp", "suction_temp"],
+        "flatline_samples": 60,          # identical-value run length (while active)
+        "min_c": -45.0, "max_c": 140.0,  # plausible pipe/refrigerant sensor range
+        # sensors eligible for flatline detection (room-air excluded on purpose)
+        "flatline_sensors": ["liquid_pipe_temp", "gas_pipe_temp",
+                             "discharge_temp", "suction_temp"],
+        # sensors checked for out-of-range
+        "range_sensors": ["room_temp", "liquid_pipe_temp", "gas_pipe_temp",
+                          "discharge_temp", "suction_temp", "outdoor_temp"],
     }
 
     def run(self, df: pd.DataFrame) -> list[Finding]:
         out: list[Finding] = []
         p = self.params
-        for sig in p["sensors"]:
+        active = _active_mask(df)
+
+        for sig in p["range_sensors"]:
             if not _has(df, sig):
                 continue
             s = df[sig]
-            # out-of-range
             oor = ((s < p["min_c"]) | (s > p["max_c"])).fillna(False)
-            for start, end, n in _contiguous_windows(oor, df["timestamp"], 1):
+            if oor.any():
+                sub = df[oor]
                 out.append(self._finding(
-                    df, start=start, end=end, severity=Severity.MEDIUM,
-                    message=f"Sensor '{sig}' out of plausible range for {n} samples.",
+                    df, start=sub["timestamp"].min(), end=sub["timestamp"].max(),
+                    severity=Severity.MEDIUM,
+                    message=(f"Sensor '{sig}' out of plausible range "
+                             f"({int(oor.sum())} samples, "
+                             f"min {s[oor].min():.1f} / max {s[oor].max():.1f} C)."),
                     recommendation=f"Inspect/replace the '{sig}' thermistor and wiring.",
-                    metrics={"sensor": sig, "samples": n},
+                    metrics={"sensor": sig, "samples": int(oor.sum())},
                 ))
-            # flatline (no change over many samples while unit is not off)
-            same = (s.diff().fillna(1) == 0)
-            for start, end, n in _contiguous_windows(same, df["timestamp"], p["flatline_samples"]):
+
+        for sig in p["flatline_sensors"]:
+            if not _has(df, sig):
+                continue
+            s = df[sig].where(active)
+            # identical consecutive values *within active operation*
+            same = (s.diff() == 0) & active
+            longest = 0
+            total = 0
+            for _s, _e, n in _contiguous_windows(same.fillna(False), df["timestamp"],
+                                                 p["flatline_samples"]):
+                longest = max(longest, n)
+                total += n
+            if longest:
                 out.append(self._finding(
-                    df, start=start, end=end, severity=Severity.LOW,
-                    message=f"Sensor '{sig}' flatlined ({n} identical readings).",
+                    df, severity=Severity.LOW,
+                    message=(f"Sensor '{sig}' flatlined while running "
+                             f"(longest {longest} consecutive identical readings)."),
                     recommendation=f"Verify the '{sig}' sensor is reporting live data.",
-                    metrics={"sensor": sig, "samples": n},
+                    metrics={"sensor": sig, "longest_run": longest,
+                             "total_flatlined": total},
                 ))
+        return out
+
+
+class HighPressureTripRisk(Detector):
+    """High side approaching the high-pressure cutout (R410A ~4.15 MPa)."""
+
+    spec = CATALOG_BY_ID["R05_hp_trip_risk"]
+    # gauge kPa; R410A HP switch ~4.15 MPa abs -> ~4050 kPa gauge. Warn at 90%.
+    params = {"warn_kpa": 3650.0, "critical_kpa": 3950.0, "min_samples": 3}
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        if not _has(df, "high_pressure"):
+            return []
+        p = self.params
+        mask = (df["high_pressure"] > p["warn_kpa"]).fillna(False)
+        out: list[Finding] = []
+        for start, end, n in _contiguous_windows(mask, df["timestamp"], p["min_samples"]):
+            win = df[(df["timestamp"] >= start) & (df["timestamp"] <= end)]
+            peak = float(win["high_pressure"].max())
+            sev = Severity.CRITICAL if peak > p["critical_kpa"] else Severity.HIGH
+            out.append(self._finding(
+                df, start=start, end=end, severity=sev,
+                message=(f"High pressure elevated for {n} samples "
+                         f"(peak {peak:.0f} kPa / {peak/6.895:.0f} psi)."),
+                recommendation=("Check condenser airflow/fouling, outdoor fan, "
+                                "ambient limits, and for overcharge."),
+                metrics={"peak_kpa": round(peak, 0), "samples": n},
+            ))
+        return out
+
+
+class LowPressureTripRisk(Detector):
+    """Low side approaching the low-pressure cutout."""
+
+    spec = CATALOG_BY_ID["R06_lp_trip_risk"]
+    # gauge kPa; warn below ~350 kPa gauge (~51 psi) while running.
+    params = {"warn_kpa": 350.0, "critical_kpa": 250.0, "min_samples": 3}
+
+    def run(self, df: pd.DataFrame) -> list[Finding]:
+        if not _has(df, "low_pressure"):
+            return []
+        p = self.params
+        run = _active_mask(df)
+        mask = ((df["low_pressure"] < p["warn_kpa"]) & run).fillna(False)
+        out: list[Finding] = []
+        for start, end, n in _contiguous_windows(mask, df["timestamp"], p["min_samples"]):
+            win = df[(df["timestamp"] >= start) & (df["timestamp"] <= end)]
+            low = float(win["low_pressure"].min())
+            sev = Severity.CRITICAL if low < p["critical_kpa"] else Severity.MEDIUM
+            out.append(self._finding(
+                df, start=start, end=end, severity=sev,
+                message=(f"Low pressure depressed for {n} samples "
+                         f"(min {low:.0f} kPa / {low/6.895:.0f} psi)."),
+                recommendation=("Check for low charge, restricted refrigerant "
+                                "flow, low indoor airflow, or a stuck expansion valve."),
+                metrics={"min_kpa": round(low, 0), "samples": n},
+            ))
         return out
 
 
@@ -220,6 +353,8 @@ class FaultCodeRollup(Detector):
 IMPLEMENTED_DETECTORS = [
     RefrigerantUndercharge,
     HighDischargeTemp,
+    HighPressureTripRisk,
+    LowPressureTripRisk,
     CompressorShortCycling,
     ComfortDeviation,
     ThermistorFault,

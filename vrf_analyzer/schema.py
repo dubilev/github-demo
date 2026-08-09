@@ -57,6 +57,7 @@ SIGNALS: dict[str, str] = {
     "evap_temp": "degC",           # evaporating temperature (saturated, from LP)
     # derived refrigerant health
     "subcool": "K",                # condenser subcooling
+    "subcool_target": "K",         # unit's target subcooling (SCm), if reported
     "superheat": "K",              # evaporator/suction superheat
     # pressures (kPa gauge)
     "high_pressure": "kPa",        # 63HS

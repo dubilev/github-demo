@@ -20,6 +20,10 @@ import pandas as pd
 class Profile:
     name: str
     description: str = ""
+    # Optional fully-custom reader: path -> normalized DataFrame. When set, it
+    # bypasses the generic read_csv/column_map path (used for complex layouts
+    # like the MN Converter export whose columns repeat per unit).
+    reader: Optional[Callable[[str], pd.DataFrame]] = None
     # source CSV column name -> canonical signal/id name
     column_map: dict[str, str] = field(default_factory=dict)
     # source column(s) that hold the timestamp; joined with a space if multiple
@@ -33,6 +37,8 @@ class Profile:
     scale: dict[str, float] = field(default_factory=dict)
     # how to detect whether this profile matches a given header set
     signature: list[str] = field(default_factory=list)
+    # substring searched in the file's first line for reader-based profiles
+    raw_signature: Optional[str] = None
 
     def matches(self, columns: list[str]) -> bool:
         if not self.signature:
@@ -106,7 +112,26 @@ MITSUBISHI_MN = Profile(
 )
 
 
-PROFILES: dict[str, Profile] = {p.name: p for p in (CANONICAL, MITSUBISHI_MN)}
+# 3) Real Mitsubishi MN Converter service export (CMS-MNG-E family). Uses a
+#    dedicated reader because columns repeat per unit and there is a metadata
+#    preamble. Detected by the 'MN Converter' marker in the file's first line.
+def _mn_reader(path: str) -> pd.DataFrame:
+    from .mn_converter import read_mn_converter  # local import avoids cycle
+    return read_mn_converter(path)
+
+
+MITSUBISHI_MN_CONVERTER = Profile(
+    name="mitsubishi_mn_converter",
+    description="Mitsubishi MN Converter service export (OU-centric wide format).",
+    reader=_mn_reader,
+    raw_signature="MN Converter",
+)
+
+
+PROFILES: dict[str, Profile] = {
+    p.name: p
+    for p in (CANONICAL, MITSUBISHI_MN, MITSUBISHI_MN_CONVERTER)
+}
 
 
 def get_profile(name: str) -> Profile:
@@ -121,5 +146,18 @@ def detect_profile(columns: list[str]) -> Optional[Profile]:
     """Return the first built-in profile whose signature matches the header."""
     for profile in PROFILES.values():
         if profile.matches(columns):
+            return profile
+    return None
+
+
+def sniff_raw_profile(path: str) -> Optional[Profile]:
+    """Detect a reader-based profile from the file's first line."""
+    try:
+        with open(path, encoding="latin-1") as fh:
+            first = fh.readline()
+    except OSError:
+        return None
+    for profile in PROFILES.values():
+        if profile.raw_signature and profile.raw_signature in first:
             return profile
     return None
