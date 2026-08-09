@@ -53,6 +53,14 @@ def test_derived_cycle_fields_present_and_sane():
     assert run["cond_temp"].median() > run["evap_temp"].median()
 
 
+def test_etm_maps_to_evap_target():
+    df = load_csv(SAMPLE)
+    run = df[(df["unit_role"] == "OU") & (df["comp_freq"] > 0)]
+    # ETm is a discrete control setpoint in a sensible evaporating-temp range
+    assert run["evap_temp_target"].notna().any()
+    assert -10 < run["evap_temp_target"].median() < 20
+
+
 def test_thermistor_mapping_th6_suction_th2_hic():
     # Per the PUMY-P manual: TH6=suction (cool, single digits), TH2=HIC (warmer).
     df = load_csv(SAMPLE)

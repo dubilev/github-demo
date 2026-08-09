@@ -56,6 +56,7 @@ SIGNALS: dict[str, str] = {
     "heatsink_temp": "degC",       # inverter heatsink (THHS)
     "cond_temp": "degC",           # condensing temperature (saturated, from HP)
     "evap_temp": "degC",           # evaporating temperature (saturated, from LP)
+    "evap_temp_target": "degC",    # target evaporating temperature (ETm control setpoint)
     # derived refrigerant health
     "subcool": "K",                # condenser subcooling
     "subcool_target": "K",         # unit's target subcooling (SCm), if reported

@@ -47,6 +47,7 @@ _OU_MAP = {
     "F/Hz": "comp_freq",
     "FAN": "fan_speed",
     "SC": "subcool",
+    "ETm": "evap_temp_target",   # target evaporating temperature (control setpoint)
     # NOTE: SCm (subcool target) is a dummy/placeholder in these exports and is
     # intentionally NOT mapped.
     "Demand(%)": "capacity_demand",
