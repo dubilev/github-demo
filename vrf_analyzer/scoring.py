@@ -85,6 +85,22 @@ def _s_undercharge(df):
     run = df[_active_mask(df) & df["subcool"].notna()]
     if len(run) < _MIN_ACTIVE:
         return None
+    # Prefer the unit's own controlled metric: HIC subcool vs its live target.
+    # Weight persistence over intensity here: brief transient dips below target
+    # are normal (load steps); undercharge shows as a *sustained* deficit.
+    if _has(run, "hic_subcool", "hic_subcool_target"):
+        deficit = run["hic_subcool_target"] - run["hic_subcool"]
+        duty = float((deficit > 3.0).mean())
+        duty_ev = float(np.clip((duty - 0.15) / (0.70 - 0.15), 0, 1))
+        med_ev = float(np.clip((deficit.median() - 2.0) / (8.0 - 2.0), 0, 1))
+        ev = 0.5 * duty_ev + 0.5 * med_ev
+        return (_prob(ev),
+                f"HIC subcool median {run['hic_subcool'].median():.1f} K vs "
+                f"{run['hic_subcool_target'].median():.0f} K target "
+                f"(deficit >3 K for {duty*100:.0f}% of run time)",
+                {"median_hic_subcool_k": round(float(run["hic_subcool"].median()), 2),
+                 "median_target_k": round(float(run["hic_subcool_target"].median()), 2),
+                 "deficit_duty": round(duty, 3)})
     sc_ev = _aggregate(_ramp_low(run["subcool"], warn=4.5, fail=0.5))
     sh_ev = 0.0
     sh_note = "superheat unavailable"

@@ -58,8 +58,11 @@ SIGNALS: dict[str, str] = {
     "evap_temp": "degC",           # evaporating temperature (saturated, from LP)
     "evap_temp_target": "degC",    # target evaporating temperature (ETm control setpoint)
     # derived refrigerant health
-    "subcool": "K",                # condenser subcooling
+    "subcool": "K",                # condenser-outlet subcooling
     "subcool_target": "K",         # unit's target subcooling (SCm), if reported
+    "hic_subcool": "K",            # liquid-line subcool after the HIC circuit
+    "hic_subcool_target": "K",     # live HIC subcool control target (HIC SCm)
+    "hic_lev_pulse": "pulse",      # subcool-circuit expansion valve (LEV_B)
     "superheat": "K",              # evaporator/suction superheat
     # pressures (kPa gauge)
     "high_pressure": "kPa",        # 63HS

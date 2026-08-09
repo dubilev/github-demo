@@ -47,9 +47,12 @@ _OU_MAP = {
     "F/Hz": "comp_freq",
     "FAN": "fan_speed",
     "SC": "subcool",
+    "HIC SC": "hic_subcool",         # liquid-line subcool after the HIC circuit
+    "HIC SCm": "hic_subcool_target", # live HIC subcool target (varies; real)
+    "LEV_B": "hic_lev_pulse",        # subcool-circuit expansion valve
     "ETm": "evap_temp_target",   # target evaporating temperature (control setpoint)
     # NOTE: SCm (subcool target) is a dummy/placeholder in these exports and is
-    # intentionally NOT mapped.
+    # intentionally NOT mapped. HIC SCm above is a different, live target.
     "Demand(%)": "capacity_demand",
     "OPERATION MODE": "mode",
     "State": "error_code",       # 'Ordinary'/'Stop'/... -> normalized below

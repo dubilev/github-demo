@@ -83,6 +83,7 @@ class RefrigerantUndercharge(Detector):
     spec = CATALOG_BY_ID["R01_undercharge"]
     params = {
         "low_subcool_k": 3.0,        # below typical target subcooling band
+        "hic_deficit_k": 3.0,        # HIC subcool this far under its live target
         "high_superheat_k": 15.0,    # LEV saturating -> escalate
         "min_duty": 0.30,            # fraction of running time with low subcool
         "escalate_superheat_duty": 0.30,
@@ -96,6 +97,38 @@ class RefrigerantUndercharge(Detector):
         run = df[_active_mask(df) & df["subcool"].notna()]
         if len(run) < p["min_running_samples"]:
             return []
+        # Prefer the unit's own controlled metric when available: HIC-circuit
+        # subcool vs its live target. Condenser-outlet SC is physics-limited at
+        # part load (Tc barely above ambient), so judging it alone over-flags
+        # units idling at minimum compressor speed.
+        if _has(run, "hic_subcool", "hic_subcool_target"):
+            deficit = run["hic_subcool_target"] - run["hic_subcool"]
+            low = deficit > p["hic_deficit_k"]
+            duty = float(low.mean())
+            if duty < p["min_duty"]:
+                return []
+            bad = run[low]
+            med_hic = float(run["hic_subcool"].median())
+            med_tgt = float(run["hic_subcool_target"].median())
+            lev_note = ""
+            if _has(run, "hic_lev_pulse"):
+                lev_note = (f"; subcool valve median "
+                            f"{float(run['hic_lev_pulse'].median()):.0f} pulses")
+            sev = Severity.HIGH if duty >= 0.5 else Severity.MEDIUM
+            return [self._finding(
+                df, start=bad["timestamp"].min(), end=bad["timestamp"].max(),
+                severity=sev,
+                message=(f"HIC subcool below its own target by >{p['hic_deficit_k']:.0f} K "
+                         f"during {duty*100:.0f}% of run time "
+                         f"(median {med_hic:.1f} K vs {med_tgt:.0f} K target{lev_note})."),
+                recommendation=(
+                    "The unit's subcool control is missing its own target - "
+                    "consistent with low charge. Leak-search, then verify charge "
+                    "by weigh-in against nameplate + line trim."),
+                metrics={"duty_fraction": round(duty, 3),
+                         "median_hic_subcool_k": round(med_hic, 2),
+                         "median_target_k": round(med_tgt, 2)},
+            )]
         low = run["subcool"] < p["low_subcool_k"]
         duty = float(low.mean())
         if duty < p["min_duty"]:
