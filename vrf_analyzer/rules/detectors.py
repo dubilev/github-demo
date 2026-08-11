@@ -537,7 +537,16 @@ class ValveLeakThrough(Detector):
                 continue
             near = float((np.abs(coldest.to_numpy() - evap)[leak.to_numpy()]
                           < p["near_evap_k"]).mean()) if leak.any() else 0.0
-            sev = Severity.HIGH if (duty > 0.5 or near > 0.3) else Severity.MEDIUM
+            med_dep = float(depress[leak].median())
+            # HIGH only with deep depression or pipes tracking saturation --
+            # shallow persistent depression (~2x the design-bleed baseline) can
+            # be piping proximity or normal bleed, not a flooding valve.
+            if near > 0.3 or med_dep > 10.0:
+                sev = Severity.HIGH
+            elif duty > 0.3 and med_dep > 8.0:
+                sev = Severity.MEDIUM
+            else:
+                sev = Severity.LOW
             total = sum(n for _, _, n in episodes)
             out.append(Finding(
                 rule_id=self.spec.rule_id,
@@ -547,9 +556,12 @@ class ValveLeakThrough(Detector):
                 start=episodes[0][0], end=episodes[-1][1],
                 message=(f"Coil pipes ran >{p['depress_k']:.0f} K below room temp "
                          f"during {duty*100:.0f}% of off-while-running time "
-                         f"({len(episodes)} episodes, {total} samples"
+                         f"(median {med_dep:.1f} K, {len(episodes)} episodes"
                          + (f"; pipes tracked evaporating temp {near*100:.0f}% "
-                            f"of leak time" if near > 0 else "") + ")."),
+                            f"of leak time" if near > 0.05 else "")
+                         + (f"; shallow depression - possibly design bleed or "
+                            f"piping proximity, compare a control zone"
+                            if sev == Severity.LOW else "") + ")."),
                 recommendation=("Valve passing refrigerant while commanded closed: "
                                 "inspect/exercise this zone's LEV (or branch-box "
                                 "port), check the coil and connector; verify with "
