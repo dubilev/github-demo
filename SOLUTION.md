@@ -47,8 +47,22 @@ brazing, vacuum decay test, internal LEV locked full open).
 
 ## Open items checklist
 
-- [ ] (a) OEM LEV service part number for the PEFY model.
-      BLOCKED: need exact PEFY model number from the nameplate.
+- [x] (a) RESOLVED AS FAR AS REMOTELY POSSIBLE (iter 2): unit identified as
+      PEFY-P25VMX-E(1) ("ceiling concealed compact depth", family
+      PEFY-P15..63VMX(L)-E, 1-phase 220-240 V). The LEV is internal, with
+      strainers, per the family refrigerant diagrams, and PEFY service manuals
+      document a "how to exchange the linear expansion valve" procedure — the
+      valve IS an orderable service part. The exact part number lives in the
+      PEFY-P VMX-E parts catalog (OCB-series document), which the manufacturer
+      sites serve but are egress-blocked here; the importer (official channel)
+      has it directly. ASK THE IMPORTER: "Quote the LEV assembly part number
+      from the PEFY-P25VMX-E parts catalog, and confirm whether the external
+      valve you propose is that OEM part relocated or a PKFY-style external
+      LEV box." Standard P25-class pipe sizes for the strainer/drier spec:
+      liquid 6.35 mm (1/4"), gas 12.7 mm (1/2") — verify on the datasheet.
+      Sources: https://www.mitsubishi-electric.co.nz/commercial/c/11195/pefy-p-vmx-e ,
+      https://www.mitsubishielectric.com.au/wp-content/uploads/2024/05/City-Multi-Indoor-PEFY-P-VMXL-E1-Specifications.pdf ,
+      https://www.manualslib.com/manual/1580597/Mitsubishi-Electric-Pefy-Series.html
 - [x] (b) RESOLVED (iter 1): externally mounted indoor-unit LEVs are factory
       precedent within City Multi. Small wall units (PKFY-P VLM / PKFY-M-NLMU
       family) ship with the LEV in a separate "External LEV Box" outside the
@@ -63,27 +77,33 @@ brazing, vacuum decay test, internal LEV locked full open).
       https://planetaklimata.com.ua/instr/Mitsubishi_Electric/Mitsubishi_Electric_PKFY-P_VLM-E_VKM-E_Data_Book_Eng.pdf ,
       https://americanhvac.nyc/how-to-fix-mitsubishi-city-multi-vrf-heating-in-cool-mode-or-when-turned-off/ ,
       http://www.bdt.co.nz/download/CityMulti_PreCommissioningManual_v2.1_YLM_201509.pdf
-- [ ] (c) Field-test plan discriminating debris vs ice vs erosion vs board:
-      drafted (forced-close via Drive Operation; heat-gun test during active
-      leak; valve autopsy on removal) — needs execution results.
-- [ ] (d) Analyze any NEW MN captures. Nothing new this iteration (only the
-      two known CSVs + the already-processed screenshot in uploads).
-- [ ] (e) Final repair package spec — drafted below, pending (a) and (b).
+- [~] (c) USER REPORTS UNAVAILABLE: forced-close / heat-gun tests cannot be
+      run before the repair. Consequence: the mechanical-vs-board question
+      stays formally open, and ROOT-CAUSE ASSIGNMENT MOVES TO THE VALVE
+      AUTOPSY at repair time (step 8 of the package). Mitigation for the board
+      risk baked into the package: after fitting the external LEV, verify
+      seal with a capture BEFORE closing up — if the new valve also fails to
+      seal on the same driver, the fault is control-side and the importer is
+      on site to see it.
+- [~] (d) USER REPORTS UNAVAILABLE: no new captures expected before the
+      repair. Post-repair capture remains the acceptance gate (item f).
+- [x] (e) RESOLVED (iter 2): final repair package spec below, updated with
+      pipe sizes; only the part-number line awaits the importer's quote.
 - [ ] (f) Post-repair verification capture confirming 002 seals
       (pipes at room while off; OU superheat ~6 K steady).
 
-## Repair package spec (draft, pending part numbers)
+## Repair package spec (FINAL — one line pending importer's part quote)
 
-1. Forced-close test FIRST (MN tool, Drive Operation → LEV 002 to 0 pulses,
-   watch TH2/TH3 15-20 min, fan-only): seals → board/positioning fault, do NOT
-   fit external LEV off the same driver without resolving; stays cold →
-   mechanical, proceed.
-2. Heat-gun test during active leak at low-ETm setting: leak stops when valve
-   body warmed → moisture ice; fix is drying (drier + deep vacuum), valve may
-   be fine.
-3. External LEV: OEM part matched to the PEFY's internal LEV drive spec
-   (pending item a), mounted in accessible branch piping, acoustically
-   considerate location.
+Pre-repair tests (forced-close, heat-gun) reported unavailable; root cause is
+assigned by the autopsy (step 8) and the board-fault risk is covered by the
+on-site verification (step 9a).
+
+1. [unavailable — skipped] Forced-close test via Drive Operation.
+2. [unavailable — skipped] Heat-gun ice test.
+3. External LEV for PEFY-P25VMX-E: OEM part per the importer's quote from the
+   VMX-E parts catalog (or PKFY-style external LEV box — importer to state
+   which), mounted in accessible branch piping (liquid 6.35 mm / gas 12.7 mm),
+   acoustically considerate location.
 4. Internal LEV driven FULL OPEN and verified before its connector moves to
    the external valve (else series restriction starves the zone).
 5. 100-mesh strainers both sides of the new LEV (heat-pump flow reversal).
@@ -94,6 +114,10 @@ brazing, vacuum decay test, internal LEV locked full open).
    wire-drawing groove vs clean seat — assigns final root cause.
 9. Post-repair MN capture at the low-ETm setting (max leak visibility):
    002 off, pipes at room temp, OU superheat ~6 K steady → sealed.
+   9a. Verify BEFORE the tech leaves site: if the NEW external valve also
+   fails to seal on the same board driver, the fault is control-side
+   (board/harness) — the one candidate the skipped tests left open — and it
+   is diagnosed on the spot instead of in two years.
 10. After confirmation, retest at higher ETm for the efficiency setting and
     confirm no gurgling at 006 (subcool should improve with the leak sealed).
 
@@ -107,3 +131,11 @@ brazing, vacuum decay test, internal LEV locked full open).
   factory architecture". Next iteration priorities: (a) needs the PEFY model
   number from the user (still BLOCKING); (c) awaits forced-close / heat-gun
   test execution; (d) awaits new captures.
+- Iter 2: user supplied model = PEFY-P25VMX-E(1) and reported pre-repair tests
+  and new captures unavailable. Resolved (a) as far as remotely possible
+  (family identified; LEV is a documented service part; exact number must come
+  from the importer's VMX-E parts catalog — manufacturer sites egress-blocked
+  here). Marked (c)/(d) unavailable; root-cause assignment moved to the valve
+  autopsy; added on-site verification step 9a to cover the board-fault branch.
+  Finalized the repair package (e). REMAINING: importer's part quote, the
+  repair itself, autopsy result, and the post-repair acceptance capture (f).
